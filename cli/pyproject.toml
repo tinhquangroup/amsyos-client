@@ -1,0 +1,51 @@
+# The `amsyos` command (spec v3 §3.2): built by scripts/build_cli.sh into dist/cli/*.whl,
+# served by the Gateway under /cli/, installed with `uvx --from <that URL> amsyos install`.
+[project]
+name = "amsyos-cli"
+version = "0.4.3"
+description = "The amsyos command: AMSYOS from a terminal or an AI coding agent, over the six MCP tools"
+requires-python = ">=3.11"
+# Open source under Apache-2.0 (the owner, 2026-11-21): the CLI, the job SDK, AMSYOS Node and
+# the service contract; the kernel is not (scripts/open_export.sh says what is published).
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+# No `mcp`: the CLI speaks the protocol itself (api.py), and the SDK pulled pywin32 in on
+# Windows, whose DLLs an update could not replace (a customer, 2026-11-20: os error 32).
+# Two well-known pure-Python libraries only (a customer, 2026-11-20: httpx2, which came in
+# with the SDK, has a name close to httpx and is one more thing to verify).
+dependencies = [
+    "httpx>=0.27",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+amsyos = "amsyos_cli.entry:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amsyos_cli"]
+
+# The adapters' templates (spec v3 §3.3) have one source, the repository's adapters/;
+# the wheel carries a copy that `amsyos init` writes from.
+[tool.hatch.build.targets.wheel.force-include]
+"../adapters" = "amsyos_cli/adapters"
+# The job contract's bindings, the same files a space gets in /opt/amsyos (services/space
+# SDK_FILES), laid out as there: `amsyos run --local` puts sdk/ on the job's PYTHONPATH,
+# sdk/node on its NODE_PATH and `amsyos-job` on its PATH. Not a top-level `amsyos`: that
+# name is the server's own distribution's, and the tool's other packages stay out of a job.
+"../sdk/amsyos/__init__.py" = "amsyos_cli/sdk/amsyos/__init__.py"
+"../sdk/node/amsyos/index.js" = "amsyos_cli/sdk/node/amsyos/index.js"
+"../sdk/node/amsyos/package.json" = "amsyos_cli/sdk/node/amsyos/package.json"
+"../sdk/bin/amsyos-job" = "amsyos_cli/sdk/bin/amsyos-job"
+
+# The repository's rules, for a program that runs on Python 3.11 as one short command:
+# blocking file calls are fine in it, and its parser is one long function.
+[tool.ruff]
+extend = "../pyproject.toml"
+target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+"amsyos_cli/**" = ["ASYNC240", "PLR0915"]

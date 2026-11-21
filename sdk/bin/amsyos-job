@@ -1,0 +1,165 @@
+#!/opt/conda/bin/python -I
+"""amsyos-job: the job contract of an organisation's own service, for any language.
+
+A service on an organisation's space (spec v2 §21) is started once a job with
+$AMSYOS_JOB naming the job's folder. This command reads and writes that folder, as the
+modules `amsyos` do for Python and Node:
+
+    amsyos-job params                  all the params, as JSON (defaults filled in)
+    amsyos-job param <name> [--raw]    one param as JSON (null when absent); --raw: a
+                                       string as it is, anything else as JSON
+    amsyos-job input <name>            the path of the input file, or nothing
+    amsyos-job input-name <name>       the name it was uploaded with, or nothing
+    amsyos-job output <name> [.ext]    the path to write the output <name> to
+    amsyos-job progress <0-100>        how far the job is
+    amsyos-job fail <hint> [code]      ends the job as failed (writes error.json, exits 1);
+                                       code: INVALID_PARAMS (default) or SERVICE_ERROR
+    amsyos-job next                    a server: waits for the next job, makes it the one
+                                       the commands above are about, prints its folder;
+                                       exits 1 when the machine ends the server
+    amsyos-job done                    a server: the job now is done (after fail too)
+
+A server (an image built with `serve`) loops on `next` ... `done`; from a shell:
+
+    while amsyos-job next > /dev/null; do ...; amsyos-job done; done
+
+`next` and `done` find the server's stdin and stdout through $AMSYOS_SERVE_PID, so they
+work from any child process whatever it inherited; the job now is kept in
+$AMSYOS_SERVE_STATE. Only Python's standard library, run in isolated mode: it needs
+nothing of the image.
+"""
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+USAGE = __doc__.split("\n\n")[2] if __doc__ else ""  # the commands
+LINE_MAX = 4096  # a line of the server's protocol, each way
+JOB_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def now() -> dict[str, str]:
+    """The job a server took last (`next`), if any."""
+    state = os.environ.get("AMSYOS_SERVE_STATE")
+    try:
+        told = json.loads(Path(state).read_text()) if state else {}
+    except (OSError, ValueError):
+        return {}
+    return told if isinstance(told, dict) else {}
+
+
+def folder() -> Path:
+    if os.environ.get("AMSYOS_JOB"):
+        return Path(os.environ["AMSYOS_JOB"]).resolve()
+    return Path(now().get("folder") or ".").resolve()
+
+
+def told() -> dict:
+    return json.loads((folder() / "job.json").read_text())
+
+
+def wrong(why: str) -> None:
+    sys.stderr.write(f"amsyos-job: {why}\n{USAGE}\n")
+    sys.exit(2)
+
+
+def channel(fd: int, mode: int) -> int:
+    """The server's own stdin (0) or stdout (1), however this command was started."""
+    pid = os.environ.get("AMSYOS_SERVE_PID", "")
+    if pid.isdigit():
+        return os.open(f"/proc/{pid}/fd/{fd}", mode)
+    return os.dup(fd)
+
+
+def take_next() -> None:
+    """One line of the machine's, byte by byte: nothing after it is taken."""
+    state = os.environ.get("AMSYOS_SERVE_STATE")
+    if not state:
+        wrong("next: only a server (an image built with serve) takes jobs")
+    given = channel(0, os.O_RDONLY)
+    try:
+        while True:
+            line = bytearray()
+            while (byte := os.read(given, 1)) and byte != b"\n":
+                if len(line) <= LINE_MAX:
+                    line += byte
+            if not byte and not line:
+                sys.exit(1)  # the machine ended the server
+            try:
+                job: object = json.loads(line) if len(line) <= LINE_MAX else None
+            except ValueError:
+                job = None
+            if (
+                isinstance(job, dict)
+                and isinstance(job.get("job"), str)
+                and JOB_ID.fullmatch(job["job"])
+                and isinstance(job.get("folder"), str)
+            ):
+                break
+    finally:
+        os.close(given)
+    fresh = Path(f"{state}.new")
+    fresh.write_text(json.dumps({"job": job["job"], "folder": job["folder"]}))
+    os.replace(fresh, state)
+    print(job["folder"])
+
+
+def say_done() -> None:
+    ident = now().get("job")
+    if not ident:
+        wrong("done: no job was taken with next")
+    said = channel(1, os.O_WRONLY)
+    try:
+        os.write(said, (json.dumps({"done": ident}) + "\n").encode())
+    finally:
+        os.close(said)
+    Path(os.environ["AMSYOS_SERVE_STATE"]).unlink(missing_ok=True)
+
+
+def main(args: list[str]) -> None:
+    if not args:
+        wrong("say what to do")
+    what, rest = args[0], args[1:]
+    if what == "next" and not rest:
+        take_next()
+    elif what == "done" and not rest:
+        say_done()
+    elif what == "params" and not rest:
+        print(json.dumps(told().get("params") or {}))
+    elif what == "param" and rest and rest[1:] in ([], ["--raw"]):
+        value = (told().get("params") or {}).get(rest[0])
+        raw = rest[1:] == ["--raw"] and isinstance(value, str)
+        print(value if raw else json.dumps(value))
+    elif what == "input" and len(rest) == 1:
+        rel = (told().get("inputs") or {}).get(rest[0])
+        if rel:
+            print(folder() / rel)
+    elif what == "input-name" and len(rest) == 1:
+        name = (told().get("input_names") or {}).get(rest[0])
+        if name:
+            print(name)
+    elif what == "output" and len(rest) in (1, 2):
+        suffix = rest[1] if len(rest) == 2 else ""
+        if suffix and not suffix.startswith("."):
+            suffix = f".{suffix}"
+        out = folder() / "out"
+        out.mkdir(exist_ok=True)
+        print(out / f"{rest[0]}{suffix}")
+    elif what == "progress" and len(rest) == 1:
+        try:
+            percent = float(rest[0])
+        except ValueError:
+            wrong(f"progress: a number from 0 to 100, not {rest[0][:20]!r}")
+        (folder() / "progress").write_text(f"{max(0.0, min(100.0, percent)):.0f}")
+    elif what == "fail" and len(rest) in (1, 2):
+        code = rest[1] if len(rest) == 2 else "INVALID_PARAMS"
+        (folder() / "error.json").write_text(json.dumps({"error": code, "hint": rest[0]}))
+        sys.exit(1)
+    else:
+        wrong(f"not understood: {' '.join(args)[:80]!r}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

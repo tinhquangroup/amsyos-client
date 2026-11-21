@@ -1,0 +1,3 @@
+AMSYOS Node lets an organisation's own computers serve its services.
+The node dials out to the Gateway, takes the job, and puts the report back.
+Nothing dials into the machine, and the job runs as its own account.

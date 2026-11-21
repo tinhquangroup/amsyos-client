@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "amsyos": {"type": "http", "url": "{{MCP_URL}}"}
+  }
+}

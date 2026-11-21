@@ -1,0 +1,166 @@
+"use strict";
+/*
+ * The job contract of an organisation's own service, for Node (spec v2 §21): the same
+ * surface as the Python module `amsyos`. A service on an organisation's space is
+ * started once a job with $AMSYOS_JOB naming the job's folder; this reads and writes
+ * that folder, so a service need not know its layout:
+ *
+ *   const { job } = require("amsyos");      // ESM: import { job } from "amsyos";
+ *
+ *   const text = job.params.text;            // the request's params, defaults filled in
+ *   const picture = job.input("image");      // an input file's path, or null
+ *   job.inputName("image");                  // the name it was uploaded with, or null
+ *   job.progress(40);                        // 0 to 100, optional
+ *   fs.writeFileSync(job.output("result", ".txt"), text);   // one file an output
+ *   job.fail("the picture is too small");    // ends the job with a hint
+ *
+ * Or a server (an image built with `serve`): started once, it loads what it needs, then
+ * does the jobs one after the other; `job` is the job now, the handler may be async:
+ *
+ *   const { job, serve } = require("amsyos");
+ *   const model = load();                    // once, not once a job
+ *   serve(async (job) => { fs.writeFileSync(job.output("result", ".txt"), model(job.params.text)); });
+ *
+ * Each job is a line on stdin and its end a line on stdout (what `serve` reads and
+ * writes); what the handler prints goes to stderr, the job's log. `job.fail` ends only
+ * the job; an error thrown by the handler fails the job, and the server goes on.
+ *
+ * Only Node's own modules; found through NODE_PATH on every job.
+ */
+const fs = require("fs");
+const path = require("path");
+const readline = require("readline");
+
+const LINE_MAX = 4096; // a line of the server's protocol, each way
+const JOB_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+class Failed extends Error {}
+
+class Job {
+  constructor(folder) {
+    this.folder = path.resolve(folder || process.env.AMSYOS_JOB || ".");
+    this._told = null;
+    this._serving = false;
+  }
+
+  /** job.json as it is: {params, inputs}. */
+  get told() {
+    if (this._told === null) {
+      this._told = JSON.parse(fs.readFileSync(path.join(this.folder, "job.json"), "utf8"));
+    }
+    return this._told;
+  }
+
+  /** The request's params, as the manifest's inputs name them. */
+  get params() {
+    return this.told.params || {};
+  }
+
+  /** The path of the file given for the input `name`, or null when none was. */
+  input(name) {
+    const rel = (this.told.inputs || {})[name];
+    return rel ? path.join(this.folder, rel) : null;
+  }
+
+  /** The name the file of the input `name` was uploaded with ("chair v3.glb"), or null
+   * when it is not known: a plain file name, at most 200 characters. */
+  inputName(name) {
+    return (this.told.input_names || {})[name] || null;
+  }
+
+  /** Where to write the output `name`: one file, with the extension of its kind. */
+  output(name, suffix = "") {
+    const out = path.join(this.folder, "out");
+    fs.mkdirSync(out, { recursive: true });
+    const ext = suffix && !suffix.startsWith(".") ? `.${suffix}` : suffix;
+    return path.join(out, `${name}${ext}`);
+  }
+
+  progress(percent) {
+    const at = Math.max(0, Math.min(100, Number(percent) || 0));
+    fs.writeFileSync(path.join(this.folder, "progress"), String(Math.round(at)));
+  }
+
+  /** End the job as failed; `hint` is what the caller reads to fix its request. In a
+   * server, the server goes on with the next job. */
+  fail(hint, code = "INVALID_PARAMS") {
+    const said = JSON.stringify({ error: String(code), hint: String(hint) });
+    fs.writeFileSync(path.join(this.folder, "error.json"), said);
+    if (this._serving) throw new Failed(String(hint));
+    process.exit(1);
+  }
+
+  /** Do the jobs the machine hands this process, one after the other, with
+   * `await handler(job)`, until the machine ends it. */
+  async serve(handler) {
+    // What the handler prints is its output (stderr), not the protocol (fd 1).
+    process.stdout.write = process.stderr.write.bind(process.stderr);
+    this._serving = true;
+    const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+    for await (const line of lines) {
+      const told = jobLine(line);
+      if (told === null) continue;
+      this.folder = told.folder;
+      this._told = null;
+      // A served job's temporary files in its own folder (removed with it), as a job
+      // started as a command has them: os.tmpdir() reads TMPDIR each time.
+      const tmp = path.join(this.folder, "tmp");
+      if (fs.existsSync(tmp)) {
+        for (const name of ["TMPDIR", "TEMP", "TMP"]) process.env[name] = tmp;
+      }
+      try {
+        await handler(this);
+      } catch (err) {
+        if (!(err instanceof Failed)) {
+          console.error(err);
+          this._failed(String((err && err.message) || err).slice(0, 500));
+        }
+      }
+      protocol(JSON.stringify({ done: told.job }));
+    }
+  }
+
+  _failed(hint) {
+    const error = path.join(this.folder, "error.json");
+    if (!fs.existsSync(error)) {
+      fs.writeFileSync(error, JSON.stringify({ error: "SERVICE_ERROR", hint }));
+    }
+  }
+}
+
+/** One line to the machine on fd 1, whole (a pipe Node made non-blocking may say EAGAIN). */
+function protocol(text) {
+  const data = Buffer.from(text + "\n");
+  let off = 0;
+  while (off < data.length) {
+    try {
+      off += fs.writeSync(1, data, off);
+    } catch (err) {
+      if (err.code !== "EAGAIN") throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+}
+
+/** {job, folder} of the machine's line, or null for anything else. */
+function jobLine(line) {
+  if (line.length > LINE_MAX) return null;
+  let told;
+  try {
+    told = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!told || typeof told.job !== "string" || !JOB_ID.test(told.job)) return null;
+  if (typeof told.folder !== "string") return null;
+  return { job: told.job, folder: told.folder };
+}
+
+const job = new Job();
+
+/** `job.serve(handler)`: a server's loop (an image built with `serve`). */
+function serve(handler) {
+  return job.serve(handler);
+}
+
+module.exports = { Job, job, serve };

@@ -1,0 +1,12 @@
+{
+  "description": "AMSYOS: at start, a newer amsyos installed when one is out (at most one check a day, silent otherwise), the project's brief from the last sync written into the skill's brief.md and refreshed in the background; before compaction, a checkpoint of open work. Deterministic, no model, quiet, under a second.",
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "amsyos self-update --if-needed >/dev/null 2>&1 || true", "timeout": 120}]},
+      {"hooks": [{"type": "command", "command": "amsyos sync --quiet >/dev/null 2>&1 || true", "timeout": 5}]}
+    ],
+    "PreCompact": [
+      {"hooks": [{"type": "command", "command": "amsyos work checkpoint --quiet >/dev/null 2>&1 || true", "timeout": 5}]}
+    ]
+  }
+}

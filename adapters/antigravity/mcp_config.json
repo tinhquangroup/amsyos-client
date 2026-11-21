@@ -1,0 +1,6 @@
+{
+  "_comment": "AMSYOS for Antigravity: merge into ~/.gemini/antigravity/mcp_config.json (Manage MCP servers, View raw config). Unverified: the serverUrl key is what Antigravity's public documents show for a remote server; not yet tried on an Antigravity build.",
+  "mcpServers": {
+    "amsyos": {"serverUrl": "{{MCP_URL}}"}
+  }
+}

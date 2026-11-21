@@ -1,0 +1,7 @@
+# AMSYOS for Codex: add to ~/.codex/config.toml (or the project's .codex/config.toml
+# where your Codex reads one). The URL only; then `codex mcp login amsyos` signs in with
+# the Gateway's own OAuth page. A Codex without that reads a token from the environment:
+# uncomment the line below and export AMSYOS_TOKEN yourself (never in a tracked file).
+[mcp_servers.amsyos]
+url = "{{MCP_URL}}"
+# bearer_token_env_var = "AMSYOS_TOKEN"

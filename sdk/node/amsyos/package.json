@@ -1,0 +1,9 @@
+{
+  "name": "amsyos",
+  "version": "1.0.0",
+  "description": "The job contract of a service on an organisation's AMSYOS space",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "Apache-2.0",
+  "private": true
+}

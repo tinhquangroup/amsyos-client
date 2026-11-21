@@ -1,0 +1,6 @@
+{
+  "name": "amsyos",
+  "version": "{{VERSION}}",
+  "description": "AMSYOS for Claude Code: GPU and other compute, work that outlives a session, proven services and memory, through the amsyos command",
+  "author": {"name": "AMSYOS"}
+}
