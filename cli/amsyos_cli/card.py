@@ -133,6 +133,8 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
   packages    pip packages (Python): [numpy==2.1.3]. Empty: requirements.txt is used;
               without one, init proposes the packages the code imports.
   setup       A command run once when the image is made: "npm ci", "go build -o app .".
+              A big download: "amsyos-fetch <url> --sha256 <hex> --to <path> [--unpack]
+              [--strip 1]": once a machine, one copy on the disk for all your images.
   command     The command started once a job, in the code's folder: python main.py.
   serve       Instead of command or beside it: a server kept warm between jobs
               (python server.py); see `amsyos describe space.build`, input serve.
@@ -1224,7 +1226,8 @@ SYSTEM_OF_MODULE = {
 NOT_PACKAGED = {
     "blender": (
         "conda-forge does not package Blender: fetch it pinned when the image is made "
-        "(setup: python fetch.py; `amsyos describe space.build`, setup's example)"
+        "(setup: amsyos-fetch <url> --sha256 <hex> --unpack --strip 1 --to blender; "
+        "`amsyos describe space.build`, setup's example)"
     ),
 }
 # On every space already (Ubuntu 22.04, Python 3.11, the runtimes, amsyos-job).
