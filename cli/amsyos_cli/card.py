@@ -123,6 +123,9 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
   tags        Up to 20 words discover also finds it by: [csv, chart, plot].
   where       space: the organisation's own rented machine (default). node: a computer
               of the organisation's joined as its node (deployed with node.deploy).
+  image       The image's name on the space (default: the service's, dots as _). Cards
+              naming the same image share it: each build replaces what it runs for all of
+              them, and AMSYOS runs the others' examples again. The version is the card's.
   runtime     python | node | java | go | r. python is 3.11 with PyTorch.
   system      Programs from conda-forge, name or name=version: [ffmpeg, imagemagick=7.1.2].
               init proposes those the code runs (subprocess, os.system, shutil.which:
@@ -145,19 +148,28 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
                        default: ..., description: "...", max_length: 200, min: 0, max: 9}
                 name: {enum: [line, bar], default: line}
                 name: {type: string, default: ''}   (optional; empty text when left out)
-                name: {type: file, means: sheet}    (means: what the file is: image,
-                       video, audio, sheet, mesh, document, text, report...)
+                name: {type: file, means: sheet}    (means: what the file is; below)
               The program reads them from $AMSYOS_JOB/job.json ({"params": {...},
               "inputs": {"name": "in/<file>"}}), or `from amsyos import job` (job.params,
               job.input("name")), or `amsyos-job param name` in any language.
   outputs     What a call makes, one file each: name: {type: file, format: png,
               means: image}. The program writes out/<name>.<format> in its job folder.
               Data a program reads back: format npy, npz, bin or parquet, means data.
+              JSON another service reads: means motion, timeline, plan, report or geo,
+              by what it is, or a type of your own, t_<organisation>.<name> (any format),
+              which the reading service's input names too.
               A format the call chooses: audio: {type: file, format: wav, controls:
               format, means: audio} with the input format: {enum: [wav, mp3], default:
               wav}; the program writes out/audio.<the chosen value>, one file.
               An output of means patch (a unified diff) is applied by
               `amsyos result <job> --apply`.
+  means       What a file is, with the formats it may have: image png jpg webp gif tif
+              psd; video mp4 mov webm mkv; audio wav mp3 ogg flac m4a; subtitles srt vtt;
+              text txt md; document pdf docx pptx xlsx odt html md txt; report json txt
+              md html pdf; sheet csv xlsx; table parquet; data npy npz bin parquet; plan
+              json; timeline json; motion json bvh; geo geojson json; mesh glb gltf obj;
+              web html; archive zip tar gz tgz. A narrower one (image.portrait) as
+              `amsyos discover` names it; your own, t_<organisation>.<name>, any format.
   example     One whole call's inputs: {csv: "@samples/sales.csv", x: month}. A value
               starting with @ is a local file deploy uploads first. deploy runs it once
               as the check of the new version; every required input needs a value.
@@ -216,6 +228,10 @@ def problems(card: dict[str, Any]) -> list[str]:
         found.append("service: 2 to 4 snake_case words with dots, like csv.chart")
     if not VERSION_RE.fullmatch(str(card.get("version", ""))):
         found.append('version: "1.0" (deploy counts the patch) or "1.0.3", in quotes')
+    if "image" in card and not (
+        isinstance(card["image"], str) and IMAGE_RE.fullmatch(card["image"])
+    ):
+        found.append("image: a lowercase letter, then letters, digits or _ (at most 40)")
     summary = card.get("summary")
     if not isinstance(summary, str) or not 3 <= len(summary) <= 120:
         found.append("summary: what one call takes and makes, in English, 3 to 120 characters")
@@ -651,8 +667,15 @@ def service_of(card: dict[str, Any], version: str | None) -> dict[str, Any]:
     return told
 
 
+IMAGE_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
+
+
 def image_of(card: dict[str, Any]) -> str:
-    """The image a build makes: the service's name in letters, digits and underscores."""
+    """The image a build makes: the card's `image` (a customer, 2026-11-23: a short name several
+    services may share), else the service's name in letters, digits and underscores."""
+    named = card.get("image")
+    if isinstance(named, str) and IMAGE_RE.fullmatch(named):
+        return named
     return re.sub(r"[^a-z0-9_]", "_", str(card["service"]).lower())[:40]
 
 

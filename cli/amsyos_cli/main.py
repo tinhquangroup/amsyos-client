@@ -1171,8 +1171,9 @@ async def _check_card(
         lines.append("  problem: the same as found here, above")
     lines += [f"  advice: {short(a, 300)}" for a in seq(told.get("advice"))]
     lines += [
-        f"  example.{name}: {path} is not in the workspace yet: deploy uploads it, then checks "
-        f"it (amsyos files put {shlex.quote(path)} has AMSYOS check it now)"
+        f"  note (not a problem): example.{name}: {path} is not in the workspace yet: deploy "
+        f"uploads it, then checks it (amsyos files put {shlex.quote(path)} has AMSYOS check "
+        "it now)"
         for name, path in pending.items()
     ]
     return lines
