@@ -197,6 +197,20 @@ async def cmd_whoami(args: argparse.Namespace, out: Out) -> int:
 
 
 # ---------------------------------------------------------------- services and jobs
+_LIMIT = re.compile(r"(\d{1,7})(s|m|h)?")
+
+
+def limit_of(text: str) -> int:
+    """`--limit`: seconds, or a number with s, m or h (90s, 10m, 2h); at least 10 s."""
+    found = _LIMIT.fullmatch(text.strip().lower())
+    if found is None:
+        raise argparse.ArgumentTypeError(f"{text!r}: like 90s, 10m or 2h")
+    seconds = int(found.group(1)) * {"s": 1, "m": 60, "h": 3600}[found.group(2) or "s"]
+    if not 10 <= seconds <= 31 * 86400:
+        raise argparse.ArgumentTypeError("between 10s and 744h")
+    return seconds
+
+
 def _params(items: list[str]) -> tuple[dict[str, Any], dict[str, Path]]:
     """`params.json`, `-` (JSON on stdin) or `k=v …`; `k=@path` is a local file: uploaded
     for a file input, its text for any other (`_as_declared`)."""
@@ -334,7 +348,7 @@ async def cmd_run(args: argparse.Namespace, out: Out) -> int:
         await _send_files(api, out, params, local)
         started = await api.run(
             args.service, params, key=key, wait_s=RUN_WAIT_S if args.wait else 0,
-            workspace=args.workspace,
+            workspace=args.workspace, limit_s=args.limit,
         )  # fmt: skip
         job_id = str(started.get("job_id"))
         for line in fixed_lines(started):  # what AMSYOS changed of the params, first
@@ -1877,6 +1891,11 @@ def parser() -> Parser:
     p.add_argument("--no-download", action="store_true", help="do not fetch the outputs")
     p.add_argument("--workspace", help="run in this workspace of yours")
     p.add_argument("--new", action="store_true", help="a new job even for the same call")
+    p.add_argument(
+        "--limit", type=limit_of, metavar="TIME",
+        help="end the job if it runs longer (90s, 10m, 2h): a job of your code on your "
+        "space may otherwise run as long as the space may be open",
+    )  # fmt: skip
 
     p = add(
         "wait", cmd_wait, "wait for a job's end, then fetch its outputs into <out>/<job>/",

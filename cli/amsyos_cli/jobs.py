@@ -90,10 +90,19 @@ def _about(seconds: float) -> str:
 
 
 def eta_text(told: dict[str, Any]) -> str | None:
-    """An estimate as a line says it. Where the answer splits it (`start_s`: the part of
-    `eta_s` that is a machine starting; `start`: why), `about 3 min: 2 min 10 s to start a
-    machine, 1 s to run`, or `about 5 s (a machine is warm)`; else `eta 190s` as before
-    (Codex, 2026-11-20: a GPU job's 186 s were a machine starting, its run 0.8 s)."""
+    """An estimate as a line says it, with the slowest recent run after it when the answer
+    gives one (`eta_slowest_s`, a customer's feedback: "eta 21s" took 509 s): `eta 21s, up
+    to 8 min 29 s`."""
+    said = _eta_said(told)
+    slowest = _number(told.get("eta_slowest_s"))
+    return f"{said}, up to {duration(slowest)}" if said and slowest else said
+
+
+def _eta_said(told: dict[str, Any]) -> str | None:
+    """Where the answer splits it (`start_s`: the part of `eta_s` that is a machine
+    starting; `start`: why), `about 3 min: 2 min 10 s to start a machine, 1 s to run`, or
+    `about 5 s (a machine is warm)`; else `eta 190s` as before (Codex, 2026-11-20: a GPU
+    job's 186 s were a machine starting, its run 0.8 s)."""
     eta = _number(told.get("eta_s"))
     if eta is None:
         return None

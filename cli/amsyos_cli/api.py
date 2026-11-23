@@ -191,8 +191,11 @@ class Api:
         key: str | None = None,
         wait_s: int = 0,
         workspace: str | None = None,
+        limit_s: int | None = None,
     ) -> dict[str, Any]:
         args: dict[str, Any] = {"service_id": service_id, "params": params or {}}
+        if limit_s:
+            args["max_runtime_s"] = limit_s
         if key:
             args["idempotency_key"] = key
         if wait_s:
