@@ -87,7 +87,9 @@ def _merge_json(root: Path, rel: str, update: dict[str, Any], done: Written) -> 
     _put(root, rel, json.dumps(merged, indent=2) + "\n", done)
 
 
-def _section(root: Path, rel: str, section: str, done: Written) -> bool:
+def _section(
+    root: Path, rel: str, section: str, done: Written, marks: tuple[str, str] = (BEGIN, END)
+) -> bool:
     """The text between the markers in a shared file (AGENTS.md), replaced or appended;
     True when it was there and is replaced. A file that is not UTF-8 is left as it is."""
     path = root / rel
@@ -98,7 +100,7 @@ def _section(root: Path, rel: str, section: str, done: Written) -> bool:
             "INVALID_INPUT",
             f"{path} is not UTF-8: save it as UTF-8 (nothing was written), then amsyos init again",
         ) from None
-    pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
+    pattern = re.compile(re.escape(marks[0]) + r".*?" + re.escape(marks[1]) + r"\n?", re.S)
     found = bool(pattern.search(current))
     if found:
         body = pattern.sub(lambda _m: section, current, count=1)
@@ -189,6 +191,81 @@ def write(root: Path, hosts: list[str], gateway: str) -> Written:
     for host in hosts:
         WRITERS[host](root, r, done)
     ignore_tokens(root, done)
+    return done
+
+
+# ---------------------------------------------------------------- a desk (init --type)
+# `amsyos init --type studio|work` (the owner, 2026-11-23): a folder an organisation's agent
+# works from, as AMSYOS's own media organisation's desk showed: the rules (DESK.md, the
+# person's), a log, and in each host's own instruction file a pointer to the rules.
+KINDS = ("service", "studio", "work")
+DESK, LOG = "DESK.md", "log.md"
+DESK_MARKS = ("<!-- amsyos desk -->", "<!-- /amsyos desk -->")
+DESK_SIGN = "amsyos init --type"  # in every DESK.md init writes: how a desk is known
+
+
+def desk_root(start: Path) -> Path | None:
+    """The desk a folder is in: the nearest folder up with a DESK.md that init wrote."""
+    for folder in (start, *start.parents):
+        path = folder / DESK
+        if not path.is_file():
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:2000]
+        except OSError:
+            continue
+        if DESK_SIGN in head:
+            return folder
+    return None
+
+
+def _desk_section(pointer: str, *, import_line: bool = False) -> str:
+    begin, end = DESK_MARKS
+    body = ("@DESK.md\n" if import_line else "") + pointer
+    return f"{begin}\n{body}\n{end}\n"
+
+
+def _desk_claude(root: Path, pointer: str, done: Written) -> None:
+    # Claude Code reads CLAUDE.md in every session and imports `@DESK.md` into it.
+    _section(root, "CLAUDE.md", _desk_section(pointer, import_line=True), done, DESK_MARKS)
+
+
+def _desk_codex(root: Path, pointer: str, done: Written) -> None:
+    _section(root, "AGENTS.md", _desk_section(pointer), done, DESK_MARKS)
+
+
+def _desk_cursor(root: Path, pointer: str, done: Written) -> None:
+    rule = (
+        "---\ndescription: The rules of this AMSYOS desk (DESK.md)\nalwaysApply: true\n---\n\n"
+        f"@DESK.md\n{pointer}\n"
+    )
+    _put(root, ".cursor/rules/amsyos-desk.mdc", rule, done)
+
+
+def _desk_antigravity(root: Path, pointer: str, done: Written) -> None:
+    _put(root, ".agent/rules/amsyos-desk.md", pointer + "\n", done)
+
+
+DESK_WRITERS = {
+    "claude": _desk_claude, "codex": _desk_codex, "cursor": _desk_cursor,
+    "antigravity": _desk_antigravity,
+}  # fmt: skip
+
+
+def desk(root: Path, kind: str, hosts: list[str], gateway: str, values: dict[str, str]) -> Written:
+    """DESK.md and log.md, each written once and never overwritten (they are the person's
+    and the agent's), and each host's pointer to DESK.md, replaced on every init."""
+    r = Render(gateway)
+    r.values.update(values)
+    done = Written()
+    for name, template in ((DESK, f"desk/{kind}.md"), (LOG, "desk/log.md")):
+        if (root / name).exists():
+            done.notes.append(f"{name} is there already: kept as it is")
+        else:
+            _put(root, name, r.text(template), done)
+    pointer = r.text("desk/pointer.md").rstrip("\n")
+    for host in hosts:
+        DESK_WRITERS[host](root, pointer, done)
     return done
 
 

@@ -11,7 +11,7 @@ people, AI agents and services. What runs on your machine is here, under Apache-
 - `node/`: AMSYOS Node, the one program an organisation's own computer runs to serve its
   services (`sdk/NODE.md` is its protocol).
 - `adapters/`: the brief, the skill, the hooks and the MCP entries the CLI installs for each
-  host.
+  host, and `desk/`, the rules and log `amsyos init --type studio|work` writes for a desk.
 
 The AMSYOS kernel (scheduling, isolation, billing, the knowledge graph) is not in this
 repository.
@@ -20,7 +20,7 @@ repository.
 
 The same command on Windows, macOS and Linux (it needs [uv](https://docs.astral.sh/uv/)):
 
-    uvx --from https://103.77.173.205/cli/amsyos_cli-0.4.8-py3-none-any.whl amsyos install
+    uvx --from https://103.77.173.205/cli/amsyos_cli-0.4.9-py3-none-any.whl amsyos install
 
 Then `amsyos login`, and later `amsyos self-update`. `/cli/latest.json` on the Gateway names
 the newest wheel with its sha256.

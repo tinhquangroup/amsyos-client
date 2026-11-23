@@ -1049,6 +1049,10 @@ async def cmd_init(args: argparse.Namespace, out: Out) -> int:
     root = Path(args.dir).resolve()
     if not root.is_dir():
         raise CliError("INVALID_INPUT", f"no folder {root}")
+    if args.type != "service":
+        return await _init_desk(args, out, root)
+    desk = hosts.desk_root(root.parent)  # a service's folder inside a desk
+    bare = desk is None and not any(not p.name.startswith(".") for p in root.iterdir())
     path = root / cards.CARD
     answer: dict[str, Any] = {"card": str(path)}
     lines: list[str] = []
@@ -1085,22 +1089,34 @@ async def cmd_init(args: argparse.Namespace, out: Out) -> int:
         async with Api(creds, out) as api:
             if not left and not args.no_check:
                 lines += await _check_card(api, card, answer, root)
-            lines += await _bind(api, root, answer)
-    agents = _agents(args.host or args.agent)
-    gateway = creds.gateway if creds is not None else gateway_default()
-    written = hosts.write(root, agents, gateway)
-    answer["written"] = written.files
-    answer["adapter_notes"] = written.notes
-    lines.append(f"adapters for {', '.join(agents)}: " + ", ".join(written.files))
-    lines += written.notes
+            lines += await _bind(api, desk or root, answer)
+    if desk is not None:
+        # The desk's rules and adapters serve its services' folders; none are written here.
+        answer["desk"] = str(desk)
+        lines.append(f"inside the desk {desk}: its DESK.md, adapters and project serve here")
+    else:
+        agents = _agents(args.host or args.agent)
+        gateway = creds.gateway if creds is not None else gateway_default()
+        written = hosts.write(root, agents, gateway)
+        answer["written"] = written.files
+        answer["adapter_notes"] = written.notes
+        lines.append(f"adapters for {', '.join(agents)}: " + ", ".join(written.files))
+        lines += written.notes
+    if bare:
+        lines.append(
+            "no code here: a desk an organisation builds many services from is amsyos init "
+            "--type studio; one it only uses services from, --type work"
+        )
     if state_made and (root / ".amsyos").exists():
         lines.append(repo.STATE_NOTE)
+    rel = os.path.relpath(root, Path.cwd().resolve())
+    at = "" if rel == "." else f" --dir {quoted(rel)}"  # inside a desk: from its root
     lines.append(
-        "next: fill what is left, then amsyos card --check, amsyos run --local (the example "
-        "here, nothing rented) and amsyos deploy --dry-run"
+        f"next: fill what is left, then amsyos card --check{at}, amsyos run --local{at} (the "
+        f"example here, nothing rented) and amsyos deploy --dry-run{at}"
         if left
-        else "next: amsyos run --local (the example here, nothing rented), amsyos deploy "
-        "--dry-run (what would be sent), then amsyos deploy"
+        else f"next: amsyos run --local{at} (the example here, nothing rented), amsyos deploy "
+        f"--dry-run{at} (what would be sent), then amsyos deploy{at}"
     )
     out.emit(answer, *lines)
     return 0
@@ -1208,6 +1224,74 @@ def _init_global(asked: str | None, out: Out) -> int:
         answer["written"] += done.files
         answer["notes"] += done.notes
     out.emit(answer, *answer["notes"])
+    return 0
+
+
+DESK_NEXT = {
+    "studio": "next: fill the <fill: ...> lines of DESK.md; then a service: its code in "
+    "services/<name>/, amsyos init --dir services/<name>, amsyos card --check --dir "
+    "services/<name>, amsyos deploy --dir services/<name>",
+    "work": "next: fill the <fill: ...> lines of DESK.md; then amsyos whoami (the credit) and "
+    'amsyos discover "<what the work needs>"',
+}
+
+
+async def _init_desk(args: argparse.Namespace, out: Out, root: Path) -> int:
+    """`init --type studio|work`: a desk, the folder an organisation's agent works from
+    (adapters.py, "a desk"): DESK.md and log.md written once, each host's pointer to
+    DESK.md, the host's adapters, and the folder bound to the workspace as one project."""
+    kind = str(args.type)
+    answer: dict[str, Any] = {"type": kind, "desk": str(root)}
+    lines: list[str] = []
+    unused = [f"--{n.replace('_', '-')}" for n in ("name", "from_mcp", "no_check")
+              if getattr(args, n)]  # fmt: skip
+    if unused:
+        lines.append(f"{', '.join(unused)}: for --type service only; not applied")
+    state_made = not (root / ".amsyos").exists()
+    values = {
+        "{{ORG}}": "<see amsyos whoami>",
+        "{{WORKSPACE}}": "<see amsyos whoami>",
+        "{{PERSON}}": "the user of this session",
+        "{{DATE}}": time.strftime("%Y-%m-%d", time.gmtime()),
+    }
+    try:
+        creds: Credentials | None = credentials()
+    except CliError as exc:
+        creds = None
+        lines.append(
+            f"not bound ({exc.code}): amsyos login, then amsyos init --type {kind} again "
+            "(DESK.md is kept; fill its names by hand or delete it first)"
+        )
+    if creds is not None:
+        async with Api(creds, out) as api:
+            shown, org = await asyncio.gather(
+                session_show(api), tenant_of(api), return_exceptions=True
+            )
+            if isinstance(shown, dict):
+                for key, field in (("{{WORKSPACE}}", "workspace"), ("{{PERSON}}", "person")):
+                    if isinstance(shown.get(field), str):
+                        values[key] = f"`{shown[field]}`"
+            if isinstance(org, str):
+                values["{{ORG}}"] = f"`{org}`"
+            lines += await _bind(api, root, answer)
+    agents = _agents(args.host or args.agent)
+    gateway = creds.gateway if creds is not None else gateway_default()
+    rules = hosts.desk(root, kind, agents, gateway, values)
+    written = hosts.write(root, agents, gateway)
+    answer["written"] = rules.files + written.files
+    answer["adapter_notes"] = rules.notes + written.notes
+    made = [f for f in rules.files if f in (hosts.DESK, hosts.LOG)]
+    if made:
+        lines.append(f"wrote {', '.join(made)}: the desk's rules and log, yours to edit")
+    lines += rules.notes
+    pointers = [f for f in rules.files if f not in (hosts.DESK, hosts.LOG)]
+    lines.append(f"DESK.md is read through: {', '.join(pointers)}")
+    lines.append(f"adapters for {', '.join(agents)}: " + ", ".join(written.files))
+    lines += written.notes
+    if state_made and (root / ".amsyos").exists():
+        lines.append(repo.STATE_NOTE)
+    lines.append(DESK_NEXT[kind])
+    out.emit(answer, *lines)
     return 0
 
 
@@ -1753,7 +1837,7 @@ def parser() -> Parser:
     p = add(
         "init", cmd_init,
         "bind this repository to the workspace, propose amsyos.yaml from the code, check it, "
-        "write the host's adapter",
+        "write the host's adapter; --type studio|work: a desk instead (DESK.md, log.md)",
     )  # fmt: skip
     p.add_argument(
         "--agent",
@@ -1769,6 +1853,14 @@ def parser() -> Parser:
     p.add_argument(
         "--host", choices=hosts.HOSTS, help="the AI client to write for (found by itself)"
     )
+    p.add_argument(
+        "--type", choices=hosts.KINDS, default="service",
+        help="what this folder is: service (default), one service's code: its amsyos.yaml; "
+        "studio, a desk an organisation builds many services from, one folder each under "
+        "services/; work, a desk it only uses services from. A desk gets DESK.md (its rules: "
+        "budget, licences, material from the web, what to ask first; yours to edit, never "
+        "overwritten), log.md and each host's pointer to DESK.md",
+    )  # fmt: skip
     p.add_argument("--name", help="the service's name, like csv.chart")
     p.add_argument("--dir", default=".", help="the repository (default here)")
     p.add_argument("--no-check", action="store_true", help="do not ask service.check")

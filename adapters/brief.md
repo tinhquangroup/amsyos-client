@@ -19,10 +19,10 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   `amsyos work show <job>` lists its steps, `work resume <job>` reruns only what failed.
 - Files: `amsyos files put <paths>|get <asset://...>|ls`; mark `face`: may show a real person.
 - This repository as a service: `amsyos init` binds it and proposes `amsyos.yaml` (fill each
-  `<fill: ...>`; `amsyos card --help` explains every key); `amsyos card --check` (AMSYOS too, free);
-  `amsyos run --local` tries it here, free, after checking this machine (`amsyos machine`); when it
-  says MACHINE_TOO_SMALL, use the space: `amsyos deploy --dry-run`, then `amsyos deploy [--channel
-  stable]`; `amsyos promote <service> <version>`. `amsyos contract <gp_...|service|need>`: what a
+  `<fill: ...>`; `amsyos card --help`: every key); a desk of many services: `--type studio`, one
+  that only uses services: `--type work`. `amsyos card --check` (AMSYOS too, free); `amsyos run
+  --local` tries it here, free; MACHINE_TOO_SMALL: the space, `deploy --dry-run`, `deploy [--channel
+  stable]`; `amsyos promote <service> <version>`; `amsyos contract <gp_...|service|need>`: what a
   build must meet. The space: `amsyos space show|open [--hours h] [--gpu none]|extend|close`.
 - A patch output: `amsyos result <job> --apply` names the files, then `git apply --3way`.
 - Beside other agents of the workspace: `amsyos run note.post topic=<t> text=...`, `note.list
