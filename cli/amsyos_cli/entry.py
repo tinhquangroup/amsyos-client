@@ -51,7 +51,25 @@ def utf8_output() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
 
 
+SHIM_TMP = "AMSYOS_SHIM_TMP"
+
+
+def own_tmp() -> None:
+    """The Windows shim (update.py `CMD`) points TMP at its own folder for uv's launcher,
+    which moves its working folder there once Python has started (and warns where it may not
+    enter TMP), and passes the TMP before as `+<it>`: put back before anything reads it, so
+    that amsyos and what it starts use the person's own."""
+    saved = os.environ.pop(SHIM_TMP, None)
+    if saved is None or not saved.startswith("+"):
+        return
+    if saved[1:]:
+        os.environ["TMP"] = saved[1:]
+    else:
+        os.environ.pop("TMP", None)
+
+
 def main() -> int:
+    own_tmp()
     hold()
     utf8_output()
     args = sys.argv[1:]

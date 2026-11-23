@@ -920,11 +920,6 @@ def described(root: Path, command: str | None) -> tuple[str | None, str | None]:
     return name, summary
 
 
-def name_for(root: Path, command: str | None = None) -> str:
-    """The README's title, the docstring's, else the folder's name, as a service name."""
-    return described(root, command)[0] or slug(root.resolve().name) or "my.run"
-
-
 MOST_MODULES = 20  # the entry file and the local modules it imports, read for the card
 
 
@@ -1217,6 +1212,18 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
             "job.input(name)), not on its command line: read them there (each such input "
             "says check this)"
         )
+    if found.computed:
+        notes.append(
+            "job.input is called with a name the code builds ("
+            + ", ".join(found.computed[:5])
+            + "): no card can be read from it; declare each of those inputs yourself"
+        )
+    if summary and summary.endswith("..."):
+        # A customer, 2026-11-23: a sentence cut at 120 characters passed card --check.
+        notes.append(
+            f"the first sentence is longer than 120 characters: write the summary ({summary})"
+        )
+        summary = None
     if not inputs:
         notes.append(
             "no input found in the code (no job.json, amsyos module, amsyos-job, argparse "

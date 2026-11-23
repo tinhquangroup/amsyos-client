@@ -1,16 +1,17 @@
 ## AMSYOS
 
-AMSYOS ({{GATEWAY}}) adds what this machine lacks: GPU and other compute, work that outlives
-this session, proven services, this project's memory; through `amsyos` (`--help`, `--json`).
+AMSYOS ({{GATEWAY}}) adds compute (GPUs too), work that outlives this session, your organisation's
+services and those offered to it, and this project's memory: `amsyos` (`--help`, `--json`).
 
 - `amsyos` not found: `uvx --from {{GATEWAY}}/cli/amsyos_cli-{{VERSION}}-py3-none-any.whl amsyos
-  install`, then a new terminal. On CLI_TOO_OLD or "update: <v> available": `amsyos self-update`,
-  then retry. Not logged in: `amsyos setup <file>` ({{GATEWAY}}/start), else `amsyos login`.
-- First `amsyos whoami`: who, the workspace, credit, budget (a cap), space, project, what to try.
+  install`, then a new terminal. On CLI_TOO_OLD or "update: <v> available": `amsyos self-update`
+  (refused by your host? the person runs it), then retry. Not logged in: `amsyos setup <file>`
+  ({{GATEWAY}}/start), else `amsyos login`. First `amsyos whoami`: who, where, credit, what to try.
 - Project memory: `amsyos sync` prints its brief (services, last deploy and check, warnings, what
   failed and what fixed it) into the host's file; `amsyos why <topic>`: the facts behind a line.
-- Find a service: `amsyos discover "<words>"` (no words: where to start; `--need need.json`:
-  plans with a quote); `amsyos describe <service>`: its inputs, examples, a ready `run` line.
+- Find a service: `amsyos discover "<words>"` (any language; English works best; none: where to
+  start; `--need need.json`: plans with a quote): AMSYOS's platform services, your organisation's
+  own and those offered to it. `amsyos describe <service>`: its inputs, examples, a `run` line.
 - Run one: `amsyos run <service> k=v ... --wait` (a local file as `k=@path`, sent only when the
   workspace lacks it). Outputs land in `./out/<job>/` (names and sizes printed, no contents or links).
 - A long job: `amsyos wait <job>` (through a person's approval too; `--timeout s`), `status`,

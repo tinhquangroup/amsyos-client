@@ -170,6 +170,9 @@ class Found:
     # that run them; `module` is the file being read (card.py `read_code`).
     commands: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
     module: str = ""
+    # A customer, 2026-11-23: `job.input(f"clip_{i}")`: lines where an input's name is built,
+    # which no card can be read from (card.py `propose` says so).
+    computed: list[str] = field(default_factory=list[str])
 
     def command(self, raw: str) -> None:
         word = raw.strip().strip("\"'")
@@ -904,6 +907,8 @@ class _Reader:
             if self._is_job(base) and name:
                 self.found.file(name, node.lineno)
                 self.found.how.add("sdk")
+            elif self._is_job(base) and node.args:
+                self.found.computed.append(f"{self.found.module or 'code'}:{node.lineno}")
         elif isinstance(func, ast.Attribute) and func.attr == "output" and len(node.args) >= 2:
             name, ext = _const_str(node.args[0]), _const_str(node.args[1])
             if name and ext:

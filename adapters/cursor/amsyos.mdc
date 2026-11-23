@@ -1,5 +1,5 @@
 ---
-description: AMSYOS adds GPU and other compute, work that outlives a session, proven services and memory; use it through the amsyos command when the work needs one of those, or to deploy this repository (amsyos.yaml)
+description: AMSYOS adds GPU and other compute, work that outlives a session, the organisation's own services and those offered to it, and memory; use it through the amsyos command when the work needs one of those, or to deploy this repository (amsyos.yaml)
 alwaysApply: false
 ---
 

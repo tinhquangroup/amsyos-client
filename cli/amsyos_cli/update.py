@@ -108,6 +108,11 @@ set "AMSYOS_SHIM_V="
 set /p AMSYOS_SHIM_V=<"%AMSYOS_SHIM_HOME%\\current"
 if not defined AMSYOS_SHIM_V goto none
 if not exist "%AMSYOS_SHIM_HOME%\\versions\\%AMSYOS_SHIM_V%\\Scripts\\python.exe" goto none
+rem The version's python.exe is uv's launcher: once Python has started, it moves its own
+rem working folder to TMP and warns Failed to set cwd to temp dir where it may not enter
+rem it. TMP names this folder for it; amsyos puts the one before back as it starts.
+set "AMSYOS_SHIM_TMP=+%TMP%"
+set "TMP=%~dp0"
 "%AMSYOS_SHIM_HOME%\\versions\\%AMSYOS_SHIM_V%\\Scripts\\python.exe" -m amsyos_cli %*
 exit /b %ERRORLEVEL%
 :none
@@ -482,10 +487,30 @@ def checked(layout: Layout, *, force: bool = False) -> dict[str, Any] | None:
     return kept
 
 
+# A customer's feedback (2026-11-21): an agent in auto mode was refused `amsyos self-update`
+# by its host's permission check, as replacing its own tools. So the notice names the one
+# command for the person, and what waiting costs: AMSYOS's own fixes are on its server and
+# reach every version at once; only fixes in this command wait for the update.
+FOR_PERSON = "if your agent's host refuses it, the person runs it in a terminal"
+MISSES = (
+    "until then only fixes in the amsyos command itself wait; AMSYOS's server-side fixes "
+    "need no update"
+)
+
+
+def update_lines(told: dict[str, Any]) -> list[str]:
+    """A notice (`notice`) in two lines: the version and the one command, then who runs it
+    and what staying on this version misses."""
+    return [
+        f"update: {told['newest']} available (this is {told['installed']}): {told['command']}",
+        f"  {FOR_PERSON}; {MISSES}",
+    ]
+
+
 def notice(command: str | None) -> dict[str, Any] | None:
-    """For each command (main.py): `{installed, newest, command}` when a newer version is
-    out, from the daily check; None when current, when told not to, for the update
-    commands themselves, or when the check fails."""
+    """For each command (main.py): `{installed, newest, command, who, misses}` when a newer
+    version is out, from the daily check; None when current, when told not to, for the
+    update commands themselves, or when the check fails."""
     if os.environ.get(NO_CHECK) or command in {"self-update", "install", None}:
         return None
     layout = Layout(home())
@@ -493,7 +518,10 @@ def notice(command: str | None) -> dict[str, Any] | None:
     if not kept or numbers(str(kept.get("newest") or "")) <= numbers(__version__):
         return None
     how = "amsyos self-update" if layout.ok(__version__) else str(kept.get("install"))
-    return {"installed": __version__, "newest": kept["newest"], "command": how}
+    return {
+        "installed": __version__, "newest": kept["newest"], "command": how,
+        "who": FOR_PERSON, "misses": MISSES,
+    }  # fmt: skip
 
 
 # ---------------------------------------------------------------- the commands
@@ -706,15 +734,22 @@ def self_update(
         "update": newer,
         "home": str(layout.root),
     }
+    # Before it runs: the one command for the person, and what waiting misses (`FOR_PERSON`).
+    due = {"command": "amsyos self-update", "who": FOR_PERSON, "misses": MISSES} if newer else {}
     if check:
-        said = f"amsyos {current}; the newest is {version}: amsyos self-update installs it"
-        out.emit(answer, said if newer else f"amsyos {current} is the newest")
+        said = [
+            f"amsyos {current}; the newest is {version}: amsyos self-update installs it",
+            f"  {FOR_PERSON}; {MISSES}",
+        ]
+        out.emit({**answer, **due}, *(said if newer else [f"amsyos {current} is the newest"]))
         return 0
     doing = newer or force
     if plan:
         steps = _steps(layout, told) if doing else []
         lines = [f"{i}. {s}" for i, s in enumerate(steps, 1)] or [f"amsyos {current} is the newest"]
-        out.emit({**answer, "steps": steps, "done": False}, *lines)
+        if newer:
+            lines.append(f"run: amsyos self-update ({FOR_PERSON}; {MISSES})")
+        out.emit({**answer, **due, "steps": steps, "done": False}, *lines)
         return 0
     if not doing:
         if not if_needed:  # --if-needed: silent when nothing newer is out to install
@@ -795,5 +830,5 @@ def _rollback(out: Out, layout: Layout) -> int:
 
 __all__ = [
     "Layout", "add_to_path", "checked", "home", "in_use", "install", "install_version",
-    "latest", "notice", "prune", "python_of", "self_update", "switch",
+    "latest", "notice", "prune", "python_of", "self_update", "switch", "update_lines",
 ]  # fmt: skip

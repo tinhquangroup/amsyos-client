@@ -162,6 +162,35 @@ def agent_files(files: list[str], card: dict[str, Any]) -> list[str]:
     return found
 
 
+CODE_SUFFIXES = frozenset(
+    {".py", ".sh", ".js", ".mjs", ".ts", ".rb", ".go", ".rs", ".toml", ".cfg", ".json", ".txt"}
+)
+
+
+def example_files(root: Path, files: list[str], card: dict[str, Any]) -> list[str]:
+    """A customer, 2026-11-23: the example's sample files went into the archive (879 KB for a
+    video cut) though deploy uploads them as the example's inputs too. Left out: each file
+    the example gives as `@path` that no code file of the archive names; one the code names
+    (a fixture it reads) stays."""
+    named = {
+        Path(p).as_posix().removeprefix("./")
+        for p in cards.local_files(card.get("example")).values()
+    }
+    samples = [rel for rel in files if rel in named]
+    if not samples:
+        return []
+    code = ""
+    for rel in files:
+        path = root / rel
+        if rel not in samples and path.suffix.lower() in CODE_SUFFIXES:
+            try:
+                if path.stat().st_size <= SECRET_SCAN_BYTES * 16:
+                    code += path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+    return [rel for rel in samples if Path(rel).name not in code]
+
+
 def secrets_in(root: Path, files: list[str]) -> list[str]:
     """The files that look like credentials, by name or by what a small one holds."""
     found: list[str] = []
@@ -213,6 +242,8 @@ def plan(root: Path) -> dict[str, Any]:
     files = files_of(root)
     left_out = agent_files(files, card)
     files = [f for f in files if f not in left_out]
+    samples = example_files(root, files, card)
+    files = [f for f in files if f not in samples]
     if not files:
         raise CliError("INVALID_INPUT", f"no files to deploy in {root}")
     if len(files) > MOST_ARCHIVE_FILES:
@@ -243,7 +274,7 @@ def plan(root: Path) -> dict[str, Any]:
     sizes = [{"file": rel, "size": (root / rel).stat().st_size} for rel in files]
     return {
         "card": card, "files": sizes, "archive": archive, "build": build,
-        "fingerprint": fingerprint, "left_out": left_out,
+        "fingerprint": fingerprint, "left_out": left_out, "samples": samples,
     }  # fmt: skip
 
 
@@ -264,6 +295,12 @@ def file_lines(made: dict[str, Any], *, every: bool) -> list[str]:
             f"left out, an agent's instruction files: {', '.join(left_out[:20])}"
             + (f" and {len(left_out) - 20} more" if len(left_out) > 20 else "")
             + " (a top-level .md the service needs: name it in the card's include:)"
+        )
+    samples: list[str] = made.get("samples") or []
+    if samples:
+        lines.append(
+            f"left out, the example's files (uploaded as its inputs, no code names them): "
+            f"{', '.join(samples[:20])}"
         )
     return lines
 

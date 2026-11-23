@@ -13,7 +13,7 @@ import sys
 import time
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from amsyos_cli import __version__, brief, repo, standards
 from amsyos_cli import adapters as hosts
@@ -188,6 +188,9 @@ async def cmd_whoami(args: argparse.Namespace, out: Out) -> int:
     and services to try now (amsyos_cli/overview.py)."""
     async with Api(credentials(), out) as api:
         answer, lines = await overview(api, Path.cwd())
+    told = out.extra.get("update")  # a newer amsyos is out: said here, on stdout (main)
+    if isinstance(told, dict):
+        lines += updates.update_lines(cast("dict[str, Any]", told))
     out.emit(answer, *lines)
     return 0
 
@@ -221,6 +224,33 @@ def _params(items: list[str]) -> tuple[dict[str, Any], dict[str, Path]]:
     if missing:
         raise CliError("INVALID_INPUT", f"no such file: {', '.join(missing)}")
     return params, local
+
+
+def _read_as_json(items: list[str], params: dict[str, Any]) -> dict[str, str]:
+    """The `k=v` whose text `parse_value` read as a number, true/false/null, an object or a
+    list: their text, in case the service takes text there."""
+    if len(items) == 1 and "=" not in items[0]:
+        return {}
+    texts = dict(i.split("=", 1) for i in items if "=" in i)
+    return {k: t for k, t in texts.items() if k in params and not isinstance(params[k], str)}
+
+
+async def _as_declared(
+    api: Api, service: str, params: dict[str, Any], texts: dict[str, str]
+) -> None:
+    """A customer, 2026-11-23: `end=5.5` went as a number to an input that takes text, and was
+    refused. A `k=v` read as JSON goes as its text where `describe` says the input takes text
+    (one describe, only when such a `k=v` is given); whatever describe cannot say leaves the
+    value as it was read."""
+    if not texts:
+        return
+    try:
+        inputs = obj((await api.describe(service)).get("inputs"))
+    except CliError:
+        return
+    for key, text in texts.items():
+        if obj(inputs.get(key)).get("type") in ("str", "enum"):
+            params[key] = text
 
 
 async def _send_files(api: Api, out: Out, params: dict[str, Any], local: dict[str, Path]) -> None:
@@ -281,11 +311,15 @@ async def cmd_run(args: argparse.Namespace, out: Out) -> int:
             "repository with amsyos.yaml",
         )
     params, local = _params(args.params)
+    texts = _read_as_json(args.params, params)
     creds = credentials()
-    # The key from the command, its params and the session: a file by its content.
-    keyed = {k: (f"sha256:{sha256_of(local[k])}" if k in local else v) for k, v in params.items()}
-    key = idempotency_key(args.service, keyed, creds, fresh=args.new)
     async with Api(creds, out) as api:
+        await _as_declared(api, args.service, params, texts)
+        # The key from the command, its params and the session: a file by its content.
+        keyed = {
+            k: (f"sha256:{sha256_of(local[k])}" if k in local else v) for k, v in params.items()
+        }
+        key = idempotency_key(args.service, keyed, creds, fresh=args.new)
         await _send_files(api, out, params, local)
         started = await api.run(
             args.service, params, key=key, wait_s=RUN_WAIT_S if args.wait else 0,
@@ -526,7 +560,26 @@ def _need(path: str) -> dict[str, Any]:
     return need
 
 
+# Said where an answer gives neither a time nor a cost (a customer's feedback, 2026-11-21: a
+# hit with no figures printed nothing at all).
+NO_ESTIMATE = "no estimate yet"
+
+
+def _fill_text(entry: dict[str, Any]) -> str:
+    """One thing a plan leaves for the caller to give (the planner's `fill`): a step's
+    param (`2.text`) or one of the plan's inputs, with what it wants."""
+    if entry.get("step") and entry.get("param"):
+        name = f"{entry['step']}.{entry['param']}"
+    else:
+        name = str(entry.get("input") or entry.get("param") or "?")
+    said = entry.get("give") or entry.get("how") or entry.get("must") or entry.get("write")
+    return f"{name} ({short(str(said), 80)})" if said else name
+
+
 def _plan_lines(plans: list[Any]) -> list[str]:
+    """Each plan: its quote ("no estimate yet" where it has none), why, its steps, and what
+    the caller still gives (`fill`) or the plan does not meet (`unmet`): a customer's
+    feedback (2026-11-21) took a plan whose step needs a text nobody had given."""
     lines: list[str] = []
     for n, given in enumerate(plans, 1):
         plan = obj(given)
@@ -537,6 +590,8 @@ def _plan_lines(plans: list[Any]) -> list[str]:
         eta = with_basis(eta_text(quote), quote, counts_runs=True)
         if eta:
             bits.append(eta)
+        if quote.get("cost") is None and not eta:
+            bits.append(NO_ESTIMATE)
         if quote.get("n"):
             bits.append(f"(from {quote['n']} runs)")
         lines.append(" ".join(bits) + (f"  {short(plan['why'], 160)}" if plan.get("why") else ""))
@@ -546,15 +601,35 @@ def _plan_lines(plans: list[Any]) -> list[str]:
             lines.append(
                 f"  {i}. {entry.get('service')}" + (f"  {short(params, 200)}" if params else "")
             )
+        fills = [_fill_text(obj(f)) for f in seq(plan.get("fill")) if obj(f)]
+        if fills:
+            lines.append(f"  you give: {'; '.join(fills[:8])}")
+        unmet = [
+            short(u if isinstance(u, str) else plain_json(u), 120) for u in seq(plan.get("unmet"))
+        ]
+        if unmet:
+            lines.append(f"  unmet: {'; '.join(unmet[:8])}")
     return lines
 
 
 def _hit_lines(hit: dict[str, Any]) -> list[str]:
-    """A service found: its id, estimate (said a default where no run is behind it), cost
-    and effect, and that a person reviews where one acts in it; its summary below."""
+    """A service found: its id; whether it would run now (`ready: false` with `to_run`,
+    its first call's time with the machine's start in it, `start_s`); its estimate (said a
+    default where no run is behind it, "no estimate yet" where it has none), cost and
+    effect; that a person reviews where one acts in it; its summary below. A customer's
+    feedback (2026-11-21): the line hid that its own service waited for its space."""
     cost = hit.get("est_cost")
     eta = with_basis(eta_text(hit), hit, counts_runs=True)
-    bits = [eta or "", f"cost {amount(cost)}" if cost is not None else ""]
+    bits: list[str] = []
+    if hit.get("ready") is False:
+        need = cli_hint(str(hit.get("to_run") or "describe says what it needs"))
+        bits.append(f"not ready: {short(need, 200)}" + (f"; first call {eta}" if eta else ""))
+    elif eta:
+        bits.append(eta)
+    if cost is not None:
+        bits.append(f"cost {amount(cost)}")
+    if not eta and cost is None:
+        bits.append(NO_ESTIMATE)
     bits.append(str(hit.get("effect") or ""))
     if hit.get("person_step"):
         bits.append("a person reviews")
@@ -571,18 +646,53 @@ def _group_of(hit: dict[str, Any]) -> str:
     return tags[0] if tags else str(hit.get("id") or "?").split(".", 1)[0]
 
 
-# A query that finds a service for every organisation: AMSYOS ships no service of a field
-# since 2026-11-21 (fasttest removed), so the example finds the OS's own.
-EXAMPLE_QUERY = "list my files"
+# A query that finds a service in every workspace: AMSYOS ships only its platform's own
+# services; those of a field are organisations' own or offered to them. Its words are all
+# in asset.fetch's summary, a read that changes nothing.
+EXAMPLE_QUERY = "bring a file from a URL"
+# Meaning search works across languages (kernel/search.py); the kernel says the same.
+LANGUAGES = "any language; English works best"
+SEARCH_LINE = (
+    f"amsyos discover \"<words>\" searches AMSYOS's platform services, your organisation's own "
+    f'and those other organisations offer it ({LANGUAGES}), e.g. "{EXAMPLE_QUERY}"'
+)
+# The starting list's note says how many of its first hits this workspace used most (the
+# kernel's `_starting`): those, then the starting points, are listed under two headings.
+_USED_MOST = re.compile(r"used most here: (\d+)")
+
+
+def _starting_lines(hits: list[dict[str, Any]], note: str, skip: int) -> list[str]:
+    """`discover` without words: what the workspace used most, then the starting points,
+    in the kernel's order, under those two headings where its note says how many are which;
+    else grouped by tag or family as before."""
+    lines: list[str] = []
+    found = _USED_MOST.search(note) if not skip else None
+    if found is not None:
+        used = int(found[1])
+        for name, members in (("used most here", hits[:used]), ("starting points", hits[used:])):
+            if members:
+                lines.append(f"{name}:")
+                lines += [f"  {line}" for hit in members for line in _hit_lines(hit)]
+        return lines
+    lines.append("where to start: what this workspace used most, then the starting points")
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for hit in hits:
+        groups.setdefault(_group_of(hit), []).append(hit)
+    for name, members in groups.items():
+        lines.append(f"{name}:")
+        lines += [f"  {line}" for hit in members for line in _hit_lines(hit)]
+    return lines
 
 
 async def cmd_discover(args: argparse.Namespace, out: Out) -> int:
     asked: dict[str, Any] = {}
-    if args.limit:
+    # Sent as given, 0 too: the kernel takes, cuts or refuses a page's size and says so
+    # (a customer's feedback, 2026-11-21: `--limit 0` was dropped here and read as 5).
+    if args.limit is not None:
         asked["limit"] = args.limit
     if args.automatic:
         asked["automatic"] = True
-    if args.skip:
+    if args.skip is not None:
         asked["skip"] = args.skip
     if args.need:
         asked["need"] = _need(args.need)
@@ -598,30 +708,25 @@ async def cmd_discover(args: argparse.Namespace, out: Out) -> int:
                     "this Gateway takes no typed need yet (v3 stage B): amsyos discover <words>",
                 ) from None
             raise
-    starting = not args.words and not args.need
+    starting = not " ".join(args.words).strip() and not args.need
     lines = _plan_lines(seq(found.get("plans")))
+    # Every hit the kernel returned, never cut here: it sets the page's size.
     hits = [obj(h) for h in seq(found.get("results"))]
+    note = str(found.get("note") or "")
     if starting:
         # Codex, 2026-11-20: no words were refused here although the kernel answers them
-        # with where to start (`Kernel._starting`): what the workspace used most, then the
-        # core's starting points; grouped by tag where a hit has tags, else by family.
-        lines.append("where to start: what this workspace used most, then the starting points")
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for hit in hits:
-            groups.setdefault(_group_of(hit), []).append(hit)
-        for name, members in groups.items():
-            lines.append(f"{name}:")
-            lines += [f"  {line}" for hit in members for line in _hit_lines(hit)]
+        # with where to start (`Kernel._starting`).
+        lines += _starting_lines(hits, note, int(args.skip or 0))
     else:
         lines += [line for hit in hits for line in _hit_lines(hit)]
     if not lines:
         lines.append("nothing found" + (" that meets the need" if args.need else ""))
     if found.get("more"):
         lines.append(f"{found['more']} more: --skip {int(args.skip or 0) + len(hits)}")
+    if note:  # what the kernel says of the page: its counts, a size it cut, how to go on
+        lines.append(f"note: {cli_hint(note)}")
     if starting:
-        lines.append(f'amsyos discover <words> to search (e.g. "{EXAMPLE_QUERY}")')
-    elif found.get("note"):
-        lines.append(f"note: {cli_hint(str(found['note']))}")
+        lines.append(SEARCH_LINE)
     out.emit(found, *lines)
     return 0
 
@@ -966,9 +1071,11 @@ async def cmd_init(args: argparse.Namespace, out: Out) -> int:
     if state_made and (root / ".amsyos").exists():
         lines.append(repo.STATE_NOTE)
     lines.append(
-        "next: fill what is left, then amsyos card --check and amsyos deploy --dry-run"
+        "next: fill what is left, then amsyos card --check, amsyos run --local (the example "
+        "here, nothing rented) and amsyos deploy --dry-run"
         if left
-        else "next: amsyos deploy --dry-run (what would be sent), then amsyos deploy"
+        else "next: amsyos run --local (the example here, nothing rented), amsyos deploy "
+        "--dry-run (what would be sent), then amsyos deploy"
     )
     out.emit(answer, *lines)
     return 0
@@ -1569,8 +1676,9 @@ def parser() -> Parser:
     )  # fmt: skip
     top = Parser(
         prog="amsyos",
-        description="AMSYOS from a terminal or an AI coding agent: compute, durable work, proven "
-        "services, memory. Errors say the next action in their hint.",
+        description="AMSYOS from a terminal or an AI coding agent: compute, durable work, your "
+        "organisation's own services and those offered to it, memory. Errors say the next "
+        "action in their hint.",
     )
     top.add_argument("--version", action="version", version=f"amsyos {__version__}")
     top.add_argument("--json", action="store_true", default=False, help="the whole answer as JSON")
@@ -1698,6 +1806,10 @@ def parser() -> Parser:
         "self-update", cmd_self_update,
         "install the newest amsyos beside this one and switch to it, now, in this command "
         "(a failed step changes nothing)",
+        "install the newest amsyos beside this one and switch to it, now, in this command "
+        "(a failed step changes nothing). An agent's host may refuse an agent this, as "
+        "replacing its own tools: the person then runs it in a terminal. Until then only fixes "
+        "in the amsyos command itself wait; AMSYOS's server-side fixes need no update.",
     )  # fmt: skip
     p.add_argument("--check", action="store_true", help="only say whether a newer one exists")
     p.add_argument("--plan", action="store_true", help="the steps it would take; nothing done")
@@ -1781,15 +1893,20 @@ def parser() -> Parser:
     p = add(
         "discover", cmd_discover,
         "find services by words, or plans by a typed need; no words: where to start",
+        "find services by words (any language; English works best), or plans by a typed "
+        "need; no words: where to start. It searches AMSYOS's platform services, your "
+        "organisation's own services and those other organisations offer it: services of "
+        "a field (media, documents, 3D) are organisations' own, or offered to them",
     )  # fmt: skip
     p.add_argument("words", nargs="*")
     p.add_argument(
         "--need",
         help="a typed need: a JSON file, - (stdin) or the JSON itself, of inputs, outputs, "
-        'constraints; e.g. {"inputs": {"doc": "txt"}, "outputs": {"report": "json:report"}}',
+        'constraints; its shape: {"inputs": {"clip": "video/mp4"}, "outputs": {"report": '
+        '"json:report"}} (a plan exists only where services make those types)',
     )
-    p.add_argument("--limit", type=int)
-    p.add_argument("--skip", type=int)
+    p.add_argument("--limit", type=int, help="a page's size, as the answer's note says")
+    p.add_argument("--skip", type=int, help="hits to skip: the next page")
     p.add_argument("--automatic", action="store_true", help="only services no person acts in")
     p = add("describe", cmd_describe, "a service's inputs, outputs, examples, cost and state")
     p.add_argument("service")
@@ -1959,6 +2076,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         sys.stderr.write(f"stopped after {time.monotonic() - began:.0f}s\n")
         return 130
-    if told is not None and not out.json:
-        sys.stderr.write(f"update: {told['newest']} available: {told['command']}\n")
+    said = getattr(args, "command", None) == "whoami" and code == 0  # whoami says it itself
+    if told is not None and not out.json and not said:
+        sys.stderr.write("".join(f"{line}\n" for line in updates.update_lines(told)))
     return code

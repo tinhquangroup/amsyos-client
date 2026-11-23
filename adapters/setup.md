@@ -7,7 +7,9 @@ cap of {{BUDGET}} credit (your organisation's credit pays for it), until {{UNTIL
 {{CREDIT}}
 
 AMSYOS adds what this machine lacks: GPU and other compute, work that outlives this session,
-services proven by earlier runs, and memory of this project's past work.
+your organisation's own services and those other organisations offer it, and memory of this
+project's past work. AMSYOS itself ships platform services (files, plans, tasks, spaces, notes);
+services of a field (media, documents, 3D) come from organisations, yours or one offering them.
 
 ## To the AI agent reading this
 
@@ -17,7 +19,10 @@ shell. After each step, tell the person in one line what was done.
 1. Run `amsyos --version`. If it prints the version in the wheel's name below, or a later
    one, go to step 2. If it prints an older one from 0.4.0 on, run `amsyos self-update`
    (it installs the new version beside the old one and switches; nothing in use is
-   replaced, on Windows too), then go to step 2. Otherwise:
+   replaced, on Windows too), then go to step 2. If your host refuses it (some refuse an
+   agent the replacing of its own tools), ask the person to run `amsyos self-update` in a
+   terminal and go on meanwhile: only fixes in the amsyos command wait for it; AMSYOS's
+   server-side fixes need no update. Otherwise:
    - If `uv --version` fails, install uv, then open a new shell if `uv` is still not found:
      - Windows (PowerShell): `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
      - macOS and Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
@@ -40,8 +45,15 @@ shell. After each step, tell the person in one line what was done.
    worked notably well: `amsyos feedback "<what happened; what you expected>" --job <ids>
    --kind friction|bug|idea|praise` (concrete; never a secret, a token or a file's content).
 
-On Windows, `warning: Failed to set cwd to temp dir` on stderr comes from uv's launcher, not
-AMSYOS: ignore it.
+On Windows, `warning: Failed to set cwd to temp dir` on stderr is harmless: ignore it. uv's
+launcher prints it (the `python.exe` of an environment uv made, as `uvx` and each amsyos
+version run): once it has started Python, it moves its own working folder to the temp folder
+(TMP), so as not to hold yours open, and warns when that move fails although TMP exists: the
+process may not enter it, for example under an agent's sandbox that runs commands with fewer
+rights than the person. amsyos still runs in your folder, and its exit code is unchanged. From
+0.4.4, the `amsyos` command in its `bin` points the launcher at that `bin` folder instead; `uvx`
+may still print it, and an install made before 0.4.4 keeps its older `bin` command (the install
+line above, run again, replaces it).
 
 When a step fails, the error's `hint` says what to do next. On the machine it set up, this
 file given to `amsyos setup` again says "already set up". Anywhere else, a file that was used

@@ -1,6 +1,6 @@
 ---
 name: amsyos
-description: Use AMSYOS when the work needs a GPU or more compute than this machine has, must outlive this session, can reuse a proven service of the organisation's, when this repository is deployed as an AMSYOS service (amsyos.yaml), or to recall what earlier work on this project built, broke and fixed. Works through the amsyos command.
+description: Use AMSYOS when the work needs a GPU or more compute than this machine has, must outlive this session, can use a service of the organisation's own or one offered to it, when this repository is deployed as an AMSYOS service (amsyos.yaml), or to recall what earlier work on this project built, broke and fixed. Works through the amsyos command.
 ---
 
 {{BRIEF}}

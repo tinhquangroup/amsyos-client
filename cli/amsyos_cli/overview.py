@@ -197,6 +197,14 @@ async def overview(
         lines.append("Try now:" if hits else "Try now: nothing listed; amsyos discover <words>")
         lines += [f"  {h.get('id')}: {short(str(h.get('summary') or ''), 120)}" for h in hits]
         if hits:
-            lines.append("  (amsyos describe <service> says how to call one; amsyos discover "
-                         "<words> searches)")  # fmt: skip
+            lines.append("  (amsyos describe <service> says how to call one)")
+        lines.append(f"  {SEARCHES}")
     return answer, lines
+
+
+# What `discover` searches, said as it is (a customer's feedback, 2026-11-21: whoami read as
+# a richer catalogue than there was): services of a field come from organisations.
+SEARCHES = (
+    "amsyos discover <words> (any language; English works best) searches AMSYOS's platform "
+    "services, your organisation's own and those other organisations offer it"
+)
