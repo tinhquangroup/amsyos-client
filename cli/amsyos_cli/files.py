@@ -5,6 +5,7 @@ what is in it (spec v3 §12)."""
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import urllib.parse
 from collections.abc import AsyncIterator
@@ -21,6 +22,7 @@ from amsyos_cli.common import FACE_NOTE, CliError, Out, obj, seq
 MOST_FILES = 20  # asset.upload takes at most 20 names a call
 HAS_MOST = 180  # asset.has takes at most 180 digests a call
 LOG_MOST_BYTES = 1024 * 1024
+TEXT_MOST_BYTES = 1024 * 1024  # `k=@path` of an input that takes no file: read as its text
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ -]+")
 _HEADERS = {"User-Agent": f"amsyos-cli/{__version__}"}
 
@@ -280,3 +282,34 @@ def sha256_of(path: Path) -> str:
         while chunk := fh.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def text_of(name: str, path: Path, kind: str) -> Any:
+    """`k=@path` of an input that takes no file (a customer, 2026-11-23: `spec=@spec.json`
+    went up as a file, then "spec must be JSON"): the file's UTF-8 text, as the value of
+    an input of type `kind` (str as it is, json parsed, a number or bool read)."""
+    size = path.stat().st_size
+    if size > TEXT_MOST_BYTES:
+        raise CliError(
+            "INVALID_INPUT",
+            f"{name}=@{path} is over {TEXT_MOST_BYTES // (1024 * 1024)} MB ({size} bytes), "
+            f"the most of a file's text an input of {kind} takes: give a shorter file",
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise CliError(
+            "INVALID_INPUT",
+            f"{name}=@{path} is not UTF-8 text, and {name} takes {kind}, not a file "
+            f"(amsyos describe <service> says what it takes)",
+        ) from None
+    if kind in ("str", "folder"):
+        return text
+    if kind == "enum":
+        return text.strip()
+    try:
+        return json.loads(text)
+    except ValueError:
+        if kind == "json":
+            raise CliError("INVALID_INPUT", f"{name}=@{path} is not JSON") from None
+        return text.strip()

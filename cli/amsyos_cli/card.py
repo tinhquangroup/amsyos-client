@@ -351,7 +351,9 @@ def example_problems(card: dict[str, Any]) -> list[str]:
     inputs = obj(card.get("inputs"))
     required = [k for k, v in inputs.items() if obj(v).get("required")]
     example = card.get("example")
-    if not isinstance(example, dict) or not example:
+    # A customer, 2026-11-23: a service of no input passed card --check and service.check,
+    # then deploy refused `example: {}`. With no required input it is one whole call.
+    if not isinstance(example, dict) or (not example and required):
         needs = f": give {', '.join(required)}" if required else ""
         return [f"example: none; one whole call's inputs{needs} (deploy runs it as the check)"]
     given = obj(example)
@@ -649,15 +651,58 @@ def detect_runtime(root: Path) -> tuple[str, str | None, str | None, str | None]
     if any(n.endswith(".R") for n in names):
         entry = "main.R" if "main.R" in names else sorted(n for n in names if n.endswith(".R"))[0]
         return "r", f"Rscript {entry}", None, None
-    pys = sorted(n for n in names if n.endswith(".py"))
-    serve = "python server.py" if "server.py" in names else None
+    pys = sorted(n for n in names if n.endswith(".py") and (root / n).is_file())
+    # A customer, 2026-11-23: server.py called serve(handle) and imported maskedit.py, and
+    # init wrote `command: python maskedit.py`. A file that calls the job SDK's serve is the
+    # server; a module another file of the folder imports is never the entry point.
+    texts = {n: _text(root / n) for n in pys}
+    serving = sorted(n for n, t in texts.items() if _SDK.search(t) and _SERVE_CALL.search(t))
+    serving.sort(key=lambda n: n != "server.py")
+    server = serving[0] if serving else "server.py" if "server.py" in names else None
+    serve = f"python {server}" if server else None
+    ruled_out = {"server.py", "setup.py", "conftest.py", *serving, *_imported(texts)}
     for entry in ("main.py", "app.py", "run.py", "service.py", "__main__.py"):
-        if entry in names:
+        if entry in names and entry not in ruled_out:
             return "python", f"python {entry}", serve, None
-    others = [n for n in pys if n not in {"server.py", "setup.py"} and not n.startswith("test")]
-    if others:
+    others = [n for n in pys if n not in ruled_out and not n.startswith("test")]
+    if others and not serving:
         return "python", f"python {others[0]}", serve, None
     return "python", None if serve else f"{FILL}: the command that starts one job>", serve, None
+
+
+_SDK = re.compile(r"^\s*(?:from\s+amsyos\s+import\b|import\s+amsyos\b)", re.M)
+_SERVE_CALL = re.compile(r"(?<!def )\bserve\s*\(")
+
+
+def _text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _imported(texts: dict[str, str]) -> set[str]:
+    """The files of the folder's top another of its files imports (`import maskedit`, `from
+    maskedit import edit`, `from . import maskedit`): modules, never the entry point. A
+    test or setup.py importing one says nothing."""
+    found: set[str] = set()
+    for name, text in texts.items():
+        if name.startswith("test") or name in {"setup.py", "conftest.py"}:
+            continue
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue
+        mine: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                mine |= {f"{a.name.split('.')[0]}.py" for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                mine.add(f"{node.module.split('.')[0]}.py")
+            elif isinstance(node, ast.ImportFrom) and node.level:
+                mine |= {f"{a.name}.py" for a in node.names}
+        found |= mine - {name}
+    return found & texts.keys()
 
 
 # Folders of a repository whose code is not the service's (Claude Code for a customer,
@@ -990,6 +1035,28 @@ def local_modules(root: Path, entry: Path, most: int = MOST_MODULES) -> list[Pat
     return order
 
 
+def _without_main(text: str) -> str:
+    """The module's text with its top-level `if __name__ == "__main__":` blocks blanked
+    (their lines kept, empty): what an import of it runs."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return text
+    lines = text.splitlines()
+    for node in tree.body:
+        test = node.test if isinstance(node, ast.If) and not node.orelse else None
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "__main__"
+        ):
+            for at in range(node.lineno - 1, node.end_lineno or node.lineno):
+                lines[at] = ""
+    return "\n".join(lines) + "\n"
+
+
 def read_code(root: Path, command: str | None = None) -> tuple[infer.Found, str]:
     """What the code takes and makes, and its text (for the effect and the GPU). With a
     Python entry file, the code is that file and the local modules it imports (what one
@@ -999,6 +1066,11 @@ def read_code(root: Path, command: str | None = None) -> tuple[infer.Found, str]
     entry = _entry(root, command)
     paths = local_modules(root, entry) if entry is not None else _sources(root)
     texts = [p.read_text(encoding="utf-8", errors="replace") for p in paths]
+    if entry is not None:  # an imported module's `if __name__ == "__main__":` never runs
+        texts[1:] = [
+            _without_main(t) if p.suffix == ".py" else t
+            for p, t in zip(paths[1:], texts[1:], strict=True)
+        ]
     handed: infer.Passes = {}
     for path, text in zip(paths, texts, strict=True):
         if path.suffix == ".py":
@@ -1117,8 +1189,8 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
     """A card from what the code says, and notes on how it was read. What the code does
     not say is written `<fill: ...>` (`left_to_fill` lists it)."""
     runtime, command, serve, setup = detect_runtime(root)
-    found, text = read_code(root, command)
-    named, summary = described(root, command)
+    found, text = read_code(root, command or serve)
+    named, summary = described(root, command or serve)
     service = name or named or slug(root.resolve().name) or "my.run"
     notes: list[str] = []
     inputs: dict[str, Any] = {}

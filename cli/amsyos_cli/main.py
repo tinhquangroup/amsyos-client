@@ -51,6 +51,7 @@ from amsyos_cli.files import (
     human,
     kept_for,
     sha256_of,
+    text_of,
     upload,
 )
 from amsyos_cli.jobs import (
@@ -197,7 +198,8 @@ async def cmd_whoami(args: argparse.Namespace, out: Out) -> int:
 
 # ---------------------------------------------------------------- services and jobs
 def _params(items: list[str]) -> tuple[dict[str, Any], dict[str, Path]]:
-    """`params.json`, `-` (JSON on stdin) or `k=v …`; `k=@path` is a local file to upload."""
+    """`params.json`, `-` (JSON on stdin) or `k=v …`; `k=@path` is a local file: uploaded
+    for a file input, its text for any other (`_as_declared`)."""
     if len(items) == 1 and items[0] == "-":
         raw: Any = json.load(sys.stdin)
     elif len(items) == 1 and "=" not in items[0]:
@@ -236,13 +238,15 @@ def _read_as_json(items: list[str], params: dict[str, Any]) -> dict[str, str]:
 
 
 async def _as_declared(
-    api: Api, service: str, params: dict[str, Any], texts: dict[str, str]
-) -> None:
+    api: Api, service: str, params: dict[str, Any], *, texts: dict[str, str],
+    local: dict[str, Path],
+) -> None:  # fmt: skip
     """A customer, 2026-11-23: `end=5.5` went as a number to an input that takes text, and was
-    refused. A `k=v` read as JSON goes as its text where `describe` says the input takes text
-    (one describe, only when such a `k=v` is given); whatever describe cannot say leaves the
-    value as it was read."""
-    if not texts:
+    refused. A `k=v` read as JSON goes as its text where `describe` says the input takes text;
+    a `k=@path` of an input that takes no file goes as the file's text, and leaves `local`
+    (one describe, only when such a `k=v` or a `k=@path` is given); whatever describe cannot
+    say leaves the value as it was read, a `k=@path` as a file to upload."""
+    if not texts and not local:
         return
     try:
         inputs = obj((await api.describe(service)).get("inputs"))
@@ -251,6 +255,12 @@ async def _as_declared(
     for key, text in texts.items():
         if obj(inputs.get(key)).get("type") in ("str", "enum"):
             params[key] = text
+    for key in [k for k in local if k in inputs]:
+        kind = str(obj(inputs[key]).get("type") or "asset")
+        if kind != "asset":
+            path = local.pop(key)
+            params[key] = text_of(key, path, kind)
+            api.out.note(f"{key}: the text of {path} ({key} takes {kind}, not a file)")
 
 
 async def _send_files(api: Api, out: Out, params: dict[str, Any], local: dict[str, Path]) -> None:
@@ -293,9 +303,10 @@ def _run_local(args: argparse.Namespace, out: Out) -> int:
     items = [*([args.service] if args.service else []), *args.params]
     named = items.pop(0) if items and "=" not in items[0] and items[0] != "-" else None
     params, files = _params(items) if items else ({}, {})
+    root = Path(args.dir or ".")
+    keep = root / args.out if args.keep else None  # <repository>/out/<job>/, as run's outputs
     return local_run.run_here(
-        Path(args.dir or "."), out, named=named, given=params, files=files, keep=args.keep,
-        force=args.force_here,
+        root, out, named=named, given=params, files=files, keep=keep, force=args.force_here,
     )  # fmt: skip
 
 
@@ -314,7 +325,7 @@ async def cmd_run(args: argparse.Namespace, out: Out) -> int:
     texts = _read_as_json(args.params, params)
     creds = credentials()
     async with Api(creds, out) as api:
-        await _as_declared(api, args.service, params, texts)
+        await _as_declared(api, args.service, params, texts=texts, local=local)
         # The key from the command, its params and the session: a file by its content.
         keyed = {
             k: (f"sha256:{sha256_of(local[k])}" if k in local else v) for k, v in params.items()
@@ -1839,20 +1850,30 @@ def parser() -> Parser:
     )  # fmt: skip
     p.add_argument("--dir", help="the repository (default here)")
 
-    p = add("run", cmd_run, "run a service: params as k=v (k=@file uploads it), a JSON file or -")
+    p = add(
+        "run", cmd_run,
+        "run a service: params as k=v (k=@file uploads it for a file input; another input "
+        "takes its text, at most 1 MB), a JSON file or -",
+    )  # fmt: skip
     p.add_argument("service", nargs="?", help="the service; with --local, left out")
     p.add_argument("params", nargs="*")
     p.add_argument("--local", action="store_true", help=local_run.LONG_HELP)
     p.add_argument("--dir", help="with --local: the repository (default here)")
     p.add_argument(
-        "--keep", action="store_true", help="with --local: keep the job's folder and say where"
-    )
+        "--keep", action="store_true",
+        help="with --local: keep the job's folder in the repository's <out>/<job>/ (default "
+        "out/, which deploy never packs; --out DIR elsewhere) and say where",
+    )  # fmt: skip
     p.add_argument(
         "--force", dest="force_here", action="store_true",
         help="with --local: run here even when this machine lacks what the card needs",
     )  # fmt: skip
     p.add_argument("--wait", action="store_true", help="wait for the end, as long as it takes")
-    p.add_argument("--out", default="out", help="where outputs land: <out>/<job>/ (default ./out)")
+    p.add_argument(
+        "--out", default="out",
+        help="where outputs land: <out>/<job>/ (default ./out); with --local --keep, the "
+        "job's folder, from the repository",
+    )  # fmt: skip
     p.add_argument("--no-download", action="store_true", help="do not fetch the outputs")
     p.add_argument("--workspace", help="run in this workspace of yours")
     p.add_argument("--new", action="store_true", help="a new job even for the same call")

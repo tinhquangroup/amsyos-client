@@ -49,14 +49,15 @@ from amsyos_cli import card as cards
 from amsyos_cli import deploy
 from amsyos_cli import machine as machines
 from amsyos_cli.common import CliError, Out, obj, seq
-from amsyos_cli.files import human
+from amsyos_cli.files import human, text_of
 
 LONG_HELP = (
     "run --local: runs your code here, as the space would; nothing is sent. In a repository "
     "with amsyos.yaml: a job folder made as the space makes it (job.json from the card's "
     "example; params k=v or k=@file change it), the card's command run there with the job "
     "module (import amsyos, amsyos-job), then its outputs checked against the card's "
-    "outputs and its tests, as deploy's check would. Free. --keep keeps the folder."
+    "outputs and its tests, as deploy's check would. Free. --keep keeps the job's folder "
+    "in <out>/<job>/ of the repository (default out/, which deploy never packs)."
 )
 LIMIT_S = 3600  # a job here runs at most this long, as a space's first hour
 STOP_S = 10  # a server, after its job: this long to end by itself
@@ -202,6 +203,8 @@ def _params(
             sources[name] = source
             params[name] = f"asset://a_local_{name}"  # what a call gives: its file's ref
             continue
+        if name in files:  # `k=@path` of an input that takes no file: its text, as `run` sends
+            value = text_of(name, files[name], kind)
         if kind == "enum":
             values = seq(obj(raw).get("enum")) or seq(spec.get("values"))
             matched, changed = _enum(value, values)
@@ -230,11 +233,25 @@ def _params(
 
 
 # ---------------------------------------------------------------- the job's folder
+def _base(job_id: str, keep: Path | None) -> Path:
+    """The run's folder: with --keep, `<keep>/<job>/` (a customer, 2026-11-23: the desk keeps
+    its files in its own folder, not in /tmp); else a temporary one, removed after."""
+    if keep is None:
+        return Path(tempfile.mkdtemp(prefix="amsyos-local-"))
+    base = keep.resolve() / job_id
+    try:
+        base.mkdir(parents=True)
+    except OSError as exc:
+        raise CliError(
+            "INVALID_INPUT", f"--keep: cannot make {base} ({exc}): give --out DIR"
+        ) from None
+    return base
+
+
 def _job_folder(
-    base: Path, card: dict[str, Any], params: dict[str, Any], sources: dict[str, Path]
-) -> tuple[str, Path]:
+    base: Path, job_id: str, card: dict[str, Any], params: dict[str, Any], sources: dict[str, Path]
+) -> Path:
     """`job/` as space_run.py `hand_over` gives it to the organisation's code."""
-    job_id = f"j_local_{secrets.token_hex(6)}"
     job = base / "job"
     for folder in (job, job / "in", job / "out", job / "tmp"):
         folder.mkdir()
@@ -256,7 +273,7 @@ def _job_folder(
     if names:
         told["input_names"] = names
     (job / "job.json").write_text(json.dumps(told), encoding="utf-8")
-    return job_id, job
+    return job
 
 
 def _code_folder(base: Path, root: Path, card: dict[str, Any]) -> tuple[Path, str]:
@@ -802,11 +819,12 @@ def run_here(
     named: str | None = None,
     given: dict[str, Any] | None = None,
     files: dict[str, Path] | None = None,
-    keep: bool = False,
+    keep: Path | None = None,
     force: bool = False,
 ) -> int:
     """`amsyos run --local`: 0 when the job succeeded and the check and its tests pass, 1
-    when not; a card or params it cannot run with are an error before anything starts."""
+    when not; a card or params it cannot run with are an error before anything starts.
+    `keep`: the folder the job's folder is kept in, as `<keep>/<job>/`."""
     root = root.resolve()
     card = cards.load(root)
     service = str(card.get("service") or "")
@@ -844,9 +862,10 @@ def run_here(
         raise CliError("INVALID_CARD", f"{cards.CARD}: its command does not read: {exc}") from None
     if not words:
         raise CliError("INVALID_CARD", f"{cards.CARD}: command (started once a job) is empty")
-    base = Path(tempfile.mkdtemp(prefix="amsyos-local-"))
+    job_id = f"j_local_{secrets.token_hex(6)}"
+    base = _base(job_id, keep)
     try:
-        job_id, job = _job_folder(base, card, params, sources)
+        job = _job_folder(base, job_id, card, params, sources)
         code_dir, where = _code_folder(base, root, card)
         bin_dir = _bin(base, sdk)
         python_bin: Path | None = None
@@ -897,16 +916,18 @@ def run_here(
                 "(it ran in a copy of what deploy packs: a file .gitignore leaves out is not "
                 "there, as on the space)",
             )
-        if keep:
+        if keep is not None:
             answer["folder"] = str(base)
-            lines.append(f"kept: {base} (job/ is $AMSYOS_JOB, job.log what it printed)")
+            lines.append(
+                f"kept: {base} (job/ is $AMSYOS_JOB, job/out/ its outputs, job.log what it printed)"
+            )
             lines.append(f"again by hand: {_by_hand(job, sdk, code_dir, words)}")
         elif judged.files:
-            lines.append("its files go with the job's folder: --keep keeps them")
+            lines.append("its files go with the job's folder: --keep keeps them in out/<job>/")
         out.emit(answer, *lines)
         return 0 if passed else 1
     finally:
-        if not keep:
+        if keep is None:
             shutil.rmtree(base, ignore_errors=True)
 
 
