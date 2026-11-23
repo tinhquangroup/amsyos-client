@@ -322,8 +322,37 @@ def credentials() -> Credentials:
             "unset AMSYOS_GATEWAY, or amsyos login again there",
         )
     if creds.expires_at is not None and creds.expires_at < time.time():
-        raise CliError("SESSION_ENDED", "the session has ended; amsyos login again")
+        raise CliError("SESSION_ENDED", _renew(creds, "the session ended at"))
     return creds
+
+
+ENDING_S = 2 * 3600.0  # a session's last hours: each command says when it ends
+
+
+def _renew(creds: Credentials, said: str) -> str:
+    """When the session ends and what only the person can do about it."""
+    when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(creds.expires_at or 0))
+    return (
+        f"{said} {when} UTC; only the person can start a new one: a setup file from "
+        f"{creds.gateway}/start (it lasts up to 30 days), then amsyos setup <file>; or amsyos "
+        "login (the person approves its code; 12 hours at most). Tell the person; do not retry"
+    )
+
+
+def session_ending() -> str | None:
+    """A line when the logged-in session ends within `ENDING_S` (the CLI's own file only)."""
+    if os.environ.get("AMSYOS_TOKEN"):
+        return None
+    try:
+        creds = read_credentials_file()
+    except CliError:
+        return None
+    if creds is None or creds.expires_at is None:
+        return None
+    left = creds.expires_at - time.time()
+    if not 0 < left <= ENDING_S:
+        return None
+    return "note: " + _renew(creds, f"this session ends in {left / 60:.0f} min, at")
 
 
 def gateway_default() -> str:

@@ -38,6 +38,7 @@ from amsyos_cli.common import (
     read_credentials_file,
     save_credentials,
     seq,
+    session_ending,
     short,
 )
 from amsyos_cli.deploy import check_of, deploy, dry_run, tenant_of
@@ -2219,6 +2220,9 @@ def main(argv: list[str] | None = None) -> int:
     told = updates.notice(getattr(args, "command", None))
     if told is not None:
         out.extra["update"] = told
+    ending = session_ending()  # its last 2 hours: the agent tells the person in time
+    if ending is not None:
+        out.extra["session_ending"] = ending
     try:
         code = asyncio.run(func(args, out))
     except CliError as err:
@@ -2229,4 +2233,6 @@ def main(argv: list[str] | None = None) -> int:
     said = getattr(args, "command", None) == "whoami" and code == 0  # whoami says it itself
     if told is not None and not out.json and not said:
         sys.stderr.write("".join(f"{line}\n" for line in updates.update_lines(told)))
+    if ending is not None and not out.json:
+        sys.stderr.write(ending + "\n")
     return code

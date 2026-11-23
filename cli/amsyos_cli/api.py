@@ -110,7 +110,9 @@ class Api:
             how = (
                 "AMSYOS_TOKEN is refused: set a valid one, or unset it and amsyos login"
                 if self.creds.from_env
-                else "the token is refused (revoked or ended): amsyos login again"
+                else "the token is refused (the session was ended or revoked); only the person "
+                f"can start a new one: a setup file from {self.creds.gateway}/start (up to 30 "
+                "days), then amsyos setup <file>; or amsyos login. Tell the person; do not retry"
             )
             return CliError("NOT_LOGGED_IN", how)
         reason = _first_cause(exc)
