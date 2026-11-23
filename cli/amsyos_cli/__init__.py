@@ -5,4 +5,4 @@ session (device login, spec v3 §4.2), and never prints a token, a file's conten
 signed URL unless asked (`--show-urls`).
 """
 
-__version__ = "0.4.12"
+__version__ = "0.4.13"

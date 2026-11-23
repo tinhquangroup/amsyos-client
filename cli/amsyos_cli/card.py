@@ -51,6 +51,7 @@ MEANS_OF_FORMAT = {
     **dict.fromkeys(("csv", "xlsx"), "sheet"),
     **dict.fromkeys(("glb", "gltf", "obj"), "mesh"),
     **dict.fromkeys(("srt", "vtt"), "subtitles"),
+    **dict.fromkeys(("cube", "3dl"), "lut"),
     **dict.fromkeys(("zip", "tar", "gz", "tgz"), "archive"),
     "json": "report", "txt": "text", "md": "text", "pdf": "document.pdf",
     "html": "web.page", "parquet": "table", "docx": "document", "pptx": "document.slides",
@@ -62,7 +63,7 @@ OUTPUT_FORMATS = frozenset({
     "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "psd", "pdf", "mp4", "m4a", "mov",
     "webm", "mkv", "wav", "mp3", "ogg", "flac", "zip", "xlsx", "docx", "pptx", "odt", "glb",
     "parquet", "npy", "npz", "gz", "tgz", "tar", "json", "gltf", "geojson", "txt", "md", "csv",
-    "srt", "vtt", "html", "obj", "bvh", "bin",
+    "srt", "vtt", "html", "obj", "bvh", "cube", "3dl", "bin",
 })  # fmt: skip
 # What a file input is, by the words of its name.
 MEANS_OF_WORD = (
@@ -150,6 +151,8 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
                        default: ..., description: "...", max_length: 200, min: 0, max: 9}
                 name: {enum: [line, bar], default: line}
                 name: {type: string, default: ''}   (optional; empty text when left out)
+                name: {type: string, multiline: true, max_length: 12000}   (several lines:
+                       a script, subtitles, a prompt; else one line)
                 name: {type: file, means: sheet}    (means: what the file is; below)
               The program reads them from $AMSYOS_JOB/job.json ({"params": {...},
               "inputs": {"name": "in/<file>"}}), or `from amsyos import job` (job.params,
@@ -1717,7 +1720,8 @@ def render(card: dict[str, Any]) -> str:
     lines += [
         "",
         "# inputs: what a call gives, by name: {type: string|integer|number|boolean|file,",
-        "#   required, default, description, max_length, min, max}, or {enum: [a, b]};",
+        "#   required, default, description, max_length, min, max, multiline: true (text of",
+        "#   several lines, max_length up to 12000)}, or {enum: [a, b]};",
         "#   a file also says what it is: means: image|video|audio|sheet|mesh|document|text.",
         "#   The program reads them from $AMSYOS_JOB/job.json, `from amsyos import job`",
         "#   (job.params, job.input(name)) or `amsyos-job param <name>`.",

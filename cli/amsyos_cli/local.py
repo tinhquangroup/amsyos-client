@@ -524,7 +524,7 @@ MAGIC: dict[str, Callable[[bytes], bool]] = {
     "tgz": _at(0, b"\x1f\x8b"), "tar": _at(257, b"ustar"),
 }  # fmt: skip
 JSON_FORMATS = frozenset({"json", "gltf", "geojson"})
-TEXT_FORMATS = frozenset({"txt", "md", "csv", "srt", "vtt", "html", "obj", "bvh"})
+TEXT_FORMATS = frozenset({"txt", "md", "csv", "srt", "vtt", "html", "obj", "bvh", "cube", "3dl"})
 
 
 def _seen_as(head: bytes) -> str:
