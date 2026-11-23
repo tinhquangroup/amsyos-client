@@ -1,4 +1,4 @@
-"""`amsyos space open|show|close|extend`: the organisation's own rented machine (spec v2
+"""`amsyos space open|show|close|extend|clean`: the organisation's own rented machine (spec v2
 §21) without `amsyos run space.*` (v3 T2: closing was `amsyos run space.close`, and its
 answer an `output job: (url hidden)` line). Each answers in one plain line; `--json` gives
 the whole answer.
@@ -100,6 +100,60 @@ def _close_line(told: dict[str, Any]) -> str:
     return ", ".join(bits)
 
 
+def _clean_line(told: dict[str, Any]) -> str:
+    on = obj(told.get("on_machine"))
+    bits: list[str] = []
+    if told.get("cleared"):
+        bits.append("space cleared: as just rented, still open")
+    elif told.get("removed") or told.get("models_removed"):
+        gone = [*map(str, seq(told.get("removed"))), *map(str, seq(told.get("models_removed")))]
+        bits.append(f"space cleaned: {', '.join(gone[:8])}")
+    else:
+        bits.append("on the space")
+    if told.get("freed_gb") is not None:
+        bits.append(f"{told['freed_gb']} GB freed")
+    images = [
+        f"{obj(i).get('image')} {obj(i).get('gb')} GB"
+        + (" (unfinished build)" if obj(i).get("unfinished") else "")
+        for i in seq(on.get("images"))
+    ]
+    models = [f"{obj(m).get('model')} {obj(m).get('gb')} GB" for m in seq(on.get("models"))]
+    if not told.get("cleared"):
+        for label, items in (("images", images), ("models", models)):
+            more = f" (+{len(items) - 8} more: --json)" if len(items) > 8 else ""
+            bits.append(f"{label}: {', '.join(items[:8]) or 'none'}{more}")
+    disk = obj(on.get("disk"))
+    if disk:
+        bits.append(f"disk {disk.get('free_gb')} GB free of {disk.get('total_gb')}")
+    if seq(told.get("left")):
+        bits.append(f"left: {short('; '.join(map(str, seq(told.get('left')))), 160)}")
+    return ", ".join(bits)
+
+
+async def _clean(api: Api, args: argparse.Namespace, out: Out) -> int:
+    params: dict[str, Any] = {}
+    for key in ("images", "models"):
+        if getattr(args, key):
+            params[key] = getattr(args, key)
+    for key in ("all", "even_if_not_kept"):
+        if getattr(args, key):
+            params[key] = True
+    started = await api.run("space.clean", params, wait_s=50)
+    job = str(started.get("job_id"))
+    status = obj(started.get("status"))
+    state = status.get("state")
+    if state in ("failed", "cancelled"):
+        failure = obj(status.get("failure"))
+        raise CliError(str(failure.get("error") or "JOB_FAILED"), str(failure.get("hint") or state))
+    if state != "succeeded":
+        out.emit(started, f"space cleaning: {job} ({state or 'queued'}); next: amsyos wait {job}")
+        return 0
+    result = obj(status.get("result")) or await api.result(job)
+    told = dict(obj(result.get("data")))
+    out.emit(told, _clean_line(told))
+    return 0
+
+
 async def cmd_space(args: argparse.Namespace, out: Out) -> int:
     what = args.space_cmd
     creds = credentials()
@@ -124,6 +178,8 @@ async def cmd_space(args: argparse.Namespace, out: Out) -> int:
                 "minute), a build waits for it",
             )
             return 0
+        if what == "clean":
+            return await _clean(api, args, out)
         if what == "close":
             try:
                 told = await api.instant(

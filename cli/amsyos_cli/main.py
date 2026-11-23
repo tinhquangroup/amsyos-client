@@ -1957,11 +1957,11 @@ def parser() -> Parser:
     top.commands["grant ask"] = ga
 
     p = add(
-        "space", cmd_space, "the organisation's space: open, show, close, extend",
+        "space", cmd_space, "the organisation's space: open, show, close, extend, clean",
         "the organisation's own rented machine, where its services are built and run (spec v2 "
-        "§21): open it for some hours, show it, close it, add hours; one line each",
+        "§21): open it for some hours, show it, close it, add hours, free its disk; one line each",
     )  # fmt: skip
-    ssub = p.add_subparsers(dest="space_cmd", metavar="open|show|close|extend", required=True)
+    ssub = p.add_subparsers(dest="space_cmd", metavar="open|show|close|extend|clean", required=True)
     so = ssub.add_parser(
         "open", parents=[common], help="rent it for some hours (credit: price_per_hour each)"
     )
@@ -1983,7 +1983,24 @@ def parser() -> Parser:
     )  # fmt: skip
     se = ssub.add_parser("extend", parents=[common], help="add hours to the open space")
     se.add_argument("--hours", type=float, required=True, help="hours to add (720 in all at most)")
-    top.commands.update({"space open": so, "space show": ss, "space close": sc, "space extend": se})
+    sk = ssub.add_parser(
+        "clean", parents=[common],
+        help="free its disk, the space left open; nothing asked: what is on it and its size",
+    )  # fmt: skip
+    sk.add_argument("--images", help="name@version,... or all: deleted; a kept one is made again")
+    sk.add_argument("--models", help="owner/name,... or all: deleted from the model cache")
+    sk.add_argument(
+        "--all", action="store_true",
+        help="the machine as just rented: every image, model, cache and file of yours",
+    )  # fmt: skip
+    sk.add_argument(
+        "--even-if-not-kept", action="store_true",
+        help="delete an image even when nothing is kept to make it again",
+    )  # fmt: skip
+    top.commands.update(
+        {"space open": so, "space show": ss, "space close": sc, "space extend": se,
+         "space clean": sk}
+    )  # fmt: skip
 
     p = add(
         "sync", cmd_sync, "the project's brief, into the host's files",
