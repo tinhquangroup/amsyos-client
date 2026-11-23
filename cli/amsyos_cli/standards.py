@@ -16,7 +16,8 @@ Inputs (`input_schema`), by the manifest's types (kernel/manifest.py `InputType`
             schema as contentSchema; its `example` as examples
     int     integer, minimum / maximum          float  number, minimum / maximum
     bool    boolean
-    enum    enum of its values, typed string, integer or number as the values are
+    enum    enum of its values, typed string, integer or number as the values are; one that
+            chooses the format of outputs (`format_of`) says them before its description
     asset   string, format uri, a description that says 'asset://…' (no pattern: describe
             stays short, and the kernel checks the reference), contentMediaType where the
             card pins the format (a schema: JSON; means document.pdf, web.page, patch); with
@@ -26,7 +27,8 @@ Inputs (`input_schema`), by the manifest's types (kernel/manifest.py `InputType`
 Each keeps its `default` and `description`; `required` lists the required; no other
 property is taken (additionalProperties false: the kernel refuses an unknown param).
 Outputs (`output_schema`): an object of one 'asset://…' string per output, its format as
-contentMediaType.
+contentMediaType; one whose format an input chooses (the card's `controls`) says its formats
+and that input in its description instead, and A2A's output modes list each format's.
 
 Effect (`annotations`, MCP's hints; the kernel caches, repeats and cancels by `effect`):
 
@@ -62,6 +64,7 @@ SINGLE_LINE = "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
 FOLDER_PATTERN = "^folder:[a-z][a-z0-9_-]{0,39}(/.*)?$"
 ASSET_SAYS = "A file: 'asset://…' (asset.upload stores one)"
 FOLDER_SAYS = "A file or folder on your organisation's node, 'folder:<name>/<path>'"
+FORMAT_SAYS = "The file format of output"  # an enum whose value an output's format is
 JSON = "application/json"
 EMBEDDED = "urn:amsyos:input:"  # the `$id` of a file's own schema inside the inputs'
 A2A_PROTOCOL = "1.0"  # A2A specification 1.0.0: AgentInterface.protocolVersion
@@ -86,7 +89,7 @@ MEDIA = {
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "patch": "text/x-diff", "diff": "text/x-diff", "yaml": "application/yaml",
     "xml": "application/xml", "bin": "application/octet-stream",
-    "file": "application/octet-stream",
+    "file": "application/octet-stream", "npy": "application/x-npy", "npz": "application/x-npz",
 }  # fmt: skip
 # A file input's `means` that pins one format (services/core/types.yaml).
 MEANS_MEDIA = {"document.pdf": "application/pdf", "web.page": "text/html", "patch": "text/x-diff"}
@@ -95,6 +98,7 @@ _MEANS_OF_MEDIA = (
     ("image/", "image"), ("video/", "video"), ("audio/", "audio"), ("model/", "mesh"),
     ("text/csv", "sheet"), ("application/pdf", "document.pdf"), ("text/html", "web.page"),
     ("text/x-diff", "patch"), ("text/plain", "text"), ("application/json", "report"),
+    ("application/x-np", "data"),
 )  # fmt: skip
 _DELETES = re.compile(
     r"\b(delete[sd]?|remove[sd]?|erase[sd]?|purge[sd]?|wipe[sd]?|overwrite[sd]?|"
@@ -179,6 +183,10 @@ def property_of(name: str, spec: Mapping[str, Any]) -> dict[str, Any]:
             else "number"
         )  # fmt: skip
         prop = {"type": typed, "enum": values}
+        chooses = [str(o) for o in _list(spec.get("format_of"))]
+        if chooses:  # a customer, 2026-11-23: the format of the file an output is
+            says = f"{FORMAT_SAYS}{'s' if len(chooses) > 1 else ''} {', '.join(chooses)}"
+            said = _line(f"{says}: {said}" if said else says)
     elif kind == "asset":
         ref: dict[str, Any] = {"type": "string", "format": "uri"}
         means = [str(m) for m in _list(spec.get("means")) or [spec.get("means")] if m]
@@ -221,22 +229,46 @@ def _format(out: Any) -> str | None:
     return fmt if isinstance(fmt, str) else None
 
 
+def _values(spec: Mapping[str, Any]) -> list[str]:
+    return [str(v) for v in _list(spec.get("enum") if "enum" in spec else spec.get("values"))]
+
+
+def chosen_of(card: Mapping[str, Any]) -> dict[str, tuple[str, list[str]]]:
+    """Each output whose format an input chooses → that input and the formats it offers: the
+    card's `controls` on the output, or the manifest's (and `describe`'s) `format_of` on the
+    input."""
+    inputs = _map(card.get("inputs"))
+    found: dict[str, tuple[str, list[str]]] = {}
+    for name, spec in inputs.items():
+        for out in _list(_map(spec).get("format_of")):
+            found[str(out)] = (name, _values(_map(spec)))
+    for name, out in _map(card.get("outputs")).items():
+        by = _map(out).get("controls")
+        if isinstance(by, str) and by in inputs:
+            found[name] = (by, _values(_map(inputs[by])))
+    return found
+
+
 def output_schema(
-    outputs: Mapping[str, Any], means: Mapping[str, Any] | None = None
+    outputs: Mapping[str, Any],
+    means: Mapping[str, Any] | None = None,
+    chosen: Mapping[str, tuple[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """Each output as the 'asset://…' string of the file it is, its format as
-    contentMediaType: an MCP tool's `outputSchema`."""
+    contentMediaType: an MCP tool's `outputSchema`. An output whose format an input chooses
+    (`chosen_of`) says the formats it may be and which input chooses, and no media type."""
     properties: dict[str, Any] = {}
     for name, out in outputs.items():
         fmt = _format(out) or "file"
+        by, formats = (chosen or {}).get(name, (None, [fmt]))
         kind = (means or {}).get(name) or _map(out).get("means")
-        what = f"the {fmt} file it makes" + (f" ({kind})" if kind else "")
+        what = f"the {' or '.join(formats) or fmt} file it makes" + (f" ({kind})" if kind else "")
         prop: dict[str, Any] = {
             "type": "string", "format": "uri", "description": f"{what[0].upper()}{what[1:]}, "
-            "as an 'asset://…' reference",
+            "as an 'asset://…' reference" + (f"; input {by} chooses its format" if by else ""),
         }  # fmt: skip
         media = media_of(fmt)
-        if media is not None:
+        if media is not None and by is None:
             prop["contentMediaType"] = media
         properties[name] = prop
     return {"type": "object", "properties": properties, "required": list(outputs)}
@@ -311,7 +343,9 @@ def mcp_tool(card: Mapping[str, Any]) -> dict[str, Any]:
         "title": title,
         "description": summary,
         "inputSchema": _map(card.get("input_schema")) or input_schema(_map(card.get("inputs"))),
-        "outputSchema": output_schema(_map(card.get("outputs")), _map(card.get("means"))),
+        "outputSchema": output_schema(
+            _map(card.get("outputs")), _map(card.get("means")), chosen_of(card)
+        ),
         "annotations": hints,
         "_meta": meta,
     }
@@ -332,7 +366,12 @@ def a2a_skill(card: Mapping[str, Any]) -> dict[str, Any]:
     file_media = [
         _map(_list(p.get("anyOf"))[0] if "anyOf" in p else p).get("contentMediaType") for p in files
     ]
-    out_media = [media_of(_format(o)) for o in _map(card.get("outputs")).values()]
+    chosen = chosen_of(card)
+    out_media = [
+        media_of(f)
+        for n, o in _map(card.get("outputs")).items()
+        for f in (chosen[n][1] if n in chosen else [_format(o)])
+    ]
     skill: dict[str, Any] = {
         "id": sid,
         "name": title_of(sid),

@@ -9,6 +9,7 @@ service need not know its layout:
     text = job.params["text"]                      # the request's params
     picture = job.input("image")                   # an input file, or None
     job.input_name("image")                        # the name it was uploaded with, or None
+    job.service, job.service_version               # which service the job is for
     job.progress(40)                               # 0 to 100, optional
     job.output("result", ".txt").write_text(text)  # one file an output
     job.fail("the picture is too small")           # ends the job with a hint
@@ -24,6 +25,8 @@ does the jobs one after the other, each in its own folder; `job` is the job now:
         job.output("result", ".txt").write_text(model(job.params["text"]))
 
     serve(handle)                                  # returns when the machine ends it
+
+A served image several services share tells their jobs apart by `job.service`.
 
 Each job is a line on stdin and its end a line on stdout (what `serve` reads and
 writes): what the handler prints goes to stderr, the job's log. `job.fail` ends only the
@@ -45,7 +48,7 @@ import tempfile
 import traceback
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 LINE_MAX = 4096  # a line of the server's protocol, each way
 _JOB_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -72,6 +75,17 @@ class Job:
     def params(self) -> dict[str, Any]:
         """The request's params, as the manifest's inputs name them."""
         return self.told.get("params", {})
+
+    @property
+    def service(self) -> str | None:
+        """The id of the service the job is for ("t_42.media.tts"), or None when job.json
+        does not say it: an image several services share tells their jobs apart by it."""
+        return _service_of(self.told)[0]
+
+    @property
+    def service_version(self) -> str | None:
+        """The version of that service ("1.2.0"), or None when job.json does not say it."""
+        return _service_of(self.told)[1]
 
     def input(self, name: str) -> Path | None:
         """The file given for the input `name`, or None when none was."""
@@ -139,6 +153,23 @@ class Job:
         error = self.folder / "error.json"
         if not error.exists():
             error.write_text(json.dumps({"error": "SERVICE_ERROR", "hint": hint}))
+
+
+def _service_of(told: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(id, version) of `service`: {"id", "version"}; an older node wrote the id alone,
+    with `version` beside it; an older space, `service_id` and `service_version`."""
+    given: object = told.get("service")
+    if isinstance(given, dict):
+        said = cast("dict[str, object]", given)
+        ident, version = said.get("id"), said.get("version")
+    elif isinstance(given, str):
+        ident, version = given, told.get("version")
+    else:
+        ident, version = told.get("service_id"), told.get("service_version")
+    return (
+        ident if isinstance(ident, str) and ident else None,
+        version if isinstance(version, str) and version else None,
+    )
 
 
 def _own_tmp(tmp: Path) -> None:

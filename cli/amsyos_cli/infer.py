@@ -13,7 +13,10 @@ Python is read by its syntax tree:
   a file input when the value is opened (`open(...)`, `Path(...)`, `read_csv(...)`), or
   its name or help says a file; a str input otherwise (T2, 2026-11-20: `sys.argv[1]` was
   not seen at all);
-- the files it writes: `out / "chart.png"`, `"out/chart.png"`, `os.path.join(out, "x.json")`.
+- the files it writes: `out / "chart.png"`, `"out/chart.png"`, `os.path.join(out, "x.json")`;
+  one whose format a param names (`job.output("audio", fmt)`, `out / f"audio.{fmt}"`, `fmt`
+  read from the params) is an output whose format that param chooses (`chosen`; card.py
+  writes it `controls`).
 Around a param it reads its type (`int(...)`, a literal default), whether it is required
 (`if not x:`), its values (`x not in ("line", "bar")`, `choices=[0, 90]`) and a description
 (`"x: ..."`).
@@ -173,6 +176,8 @@ class Found:
     # A customer, 2026-11-23: `job.input(f"clip_{i}")`: lines where an input's name is built,
     # which no card can be read from (card.py `propose` says so).
     computed: list[str] = field(default_factory=list[str])
+    # An output whose format a param names (`job.output("audio", fmt)`) → that param.
+    chosen: dict[str, str] = field(default_factory=dict[str, str])
 
     def command(self, raw: str) -> None:
         word = raw.strip().strip("\"'")
@@ -219,6 +224,11 @@ class Found:
         if not name or not name[0].isalpha():
             name = f"out_{name}" if name else "result"
         self.outputs.setdefault(name[:48], fmt.lower())
+
+    def choose(self, stem: str, param: str) -> None:
+        """An output whose file's format the param `param` names."""
+        if NAME.fullmatch(stem) and NAME.fullmatch(param) and stem not in self.outputs:
+            self.chosen.setdefault(stem, param)
 
 
 # ---------------------------------------------------------------- other languages
@@ -381,6 +391,17 @@ def _opener(call: ast.AST | None, arg: ast.AST) -> tuple[bool, str | None]:
     return True, OPENERS[name]
 
 
+def _stem_and_format(node: ast.AST) -> tuple[str, ast.expr] | None:
+    """`f"audio.{fmt}"`: the file's stem and the expression its format is."""
+    if not isinstance(node, ast.JoinedStr) or len(node.values) != 2:
+        return None
+    head, tail = node.values
+    stem = _const_str(head)
+    if not stem or not stem.endswith(".") or not isinstance(tail, ast.FormattedValue):
+        return None
+    return stem[:-1], tail.value
+
+
 def _mentions_out(node: ast.AST) -> bool:
     """An expression that names the output folder: `out`, `OUT_DIR`, `job / "out"`."""
     for sub in ast.walk(node):
@@ -451,6 +472,9 @@ class _Reader:
         self.modules: dict[str, str] = {}  # `import subprocess as sp`: sp → subprocess
         self.imported: dict[str, tuple[str, str]] = {}  # `from shutil import which`
         self.assigned: dict[str, list[ast.expr]] = {}  # what each name is bound to
+        # Files written as `<stem>.<an expression>`: an output whose format a param names
+        # when the expression is that param (read after the walk, `read`).
+        self._chosen: list[tuple[str, ast.expr]] = []
         self._imports()
         if passes:
             self._given(passes)
@@ -641,6 +665,13 @@ class _Reader:
                 match = FILE_NAME.fullmatch(name) if name else None
                 if match and name and _mentions_out(node.left):
                     self.found.output(name.rsplit(".", 1)[0], match.group(1))
+                elif (named := _stem_and_format(node.right)) and _mentions_out(node.left):
+                    self._chosen.append(named)
+        # After the walk, when every name bound to a param is known.
+        for stem, fmt in self._chosen:
+            param = self._param_of(fmt)
+            if param:
+                self.found.choose(stem, param)
         self._around()
         self._presence()
 
@@ -913,12 +944,39 @@ class _Reader:
             name, ext = _const_str(node.args[0]), _const_str(node.args[1])
             if name and ext:
                 self.found.output(name, ext.lstrip("."))
+            elif name and self._is_job(func.value):
+                self._chosen.append((name, node.args[1]))
         elif isinstance(func, ast.Attribute) and func.attr == "join":
             args = node.args
             last = _const_str(args[-1]) if args else None
             match = FILE_NAME.fullmatch(last) if last else None
             if match and last and any(_mentions_out(a) for a in args[:-1]):
                 self.found.output(last.rsplit(".", 1)[0], match.group(1))
+            elif (
+                args
+                and (named := _stem_and_format(args[-1]))
+                and any(_mentions_out(a) for a in args[:-1])
+            ):
+                self._chosen.append(named)
+
+    def _param_of(self, node: ast.AST) -> str | None:
+        """The param an expression is: a name bound to one, `p["format"]`, `p.get("format",
+        "wav")`, `job.params["format"]`, or one of those `or "wav"`."""
+        if isinstance(node, ast.Name):
+            return self.var_of.get(node.id)
+        if isinstance(node, ast.BoolOp) and node.values:
+            return self._param_of(node.values[0])
+        if isinstance(node, ast.Subscript) and self._key_of(node.value) == "params":
+            return _const_str(node.slice)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and self._key_of(node.func.value) == "params"
+        ):
+            return _const_str(node.args[0])
+        return None
 
     def _subscript(self, node: ast.Subscript) -> None:
         index = _argv_index(node)

@@ -54,8 +54,16 @@ MEANS_OF_FORMAT = {
     **dict.fromkeys(("zip", "tar", "gz", "tgz"), "archive"),
     "json": "report", "txt": "text", "md": "text", "pdf": "document.pdf",
     "html": "web.page", "parquet": "table", "docx": "document", "pptx": "document.slides",
-    "patch": "patch", "diff": "patch",
+    "patch": "patch", "diff": "patch", **dict.fromkeys(("npy", "npz", "bin"), "data"),
 }  # fmt: skip
+# The formats an output may have, which AMSYOS's check reads (kernel/conform.py KNOWN_FORMATS):
+# what an enum input that chooses an output's format (`controls`) may offer.
+OUTPUT_FORMATS = frozenset({
+    "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "psd", "pdf", "mp4", "m4a", "mov",
+    "webm", "mkv", "wav", "mp3", "ogg", "flac", "zip", "xlsx", "docx", "pptx", "odt", "glb",
+    "parquet", "npy", "npz", "gz", "tgz", "tar", "json", "gltf", "geojson", "txt", "md", "csv",
+    "srt", "vtt", "html", "obj", "bvh", "bin",
+})  # fmt: skip
 # What a file input is, by the words of its name.
 MEANS_OF_WORD = (
     (("csv", "table", "sheet", "data", "rows", "spreadsheet"), "sheet"),
@@ -144,6 +152,10 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               job.input("name")), or `amsyos-job param name` in any language.
   outputs     What a call makes, one file each: name: {type: file, format: png,
               means: image}. The program writes out/<name>.<format> in its job folder.
+              Data a program reads back: format npy, npz, bin or parquet, means data.
+              A format the call chooses: audio: {type: file, format: wav, controls:
+              format, means: audio} with the input format: {enum: [wav, mp3], default:
+              wav}; the program writes out/audio.<the chosen value>, one file.
               An output of means patch (a unified diff) is applied by
               `amsyos result <job> --apply`.
   example     One whole call's inputs: {csv: "@samples/sales.csv", x: month}. A value
@@ -224,6 +236,7 @@ def problems(card: dict[str, Any]) -> list[str]:
         for out_name, out in obj(outputs).items():
             if _format(out) is None:
                 found.append(f"outputs.{out_name}: a format, like png or {{format: png}}")
+        found += chosen_problems(card)
     inputs: Any = card.get("inputs") or {}
     if not isinstance(inputs, dict):
         found.append("inputs: a mapping of input name to its type")
@@ -292,6 +305,63 @@ def enum_problems(name: str, spec: dict[str, Any]) -> list[str]:
     if default is not None and not in_enum(default, listed):
         return [f"inputs.{name}.default: {_flow(default)} is not one of {_flow(listed)}"]
     return []
+
+
+def _enum_of(spec: dict[str, Any]) -> list[Any]:
+    """An input's enum values as the card writes them: `enum: [...]` or `type: enum, values`."""
+    return seq(spec["enum"] if "enum" in spec else spec.get("values"))
+
+
+def chosen_problems(card: dict[str, Any]) -> list[str]:
+    """Each output whose format an input chooses (`controls`), as AMSYOS checks it
+    (kernel/manifest.py `_check_chosen`): an enum input of formats an output may have, its
+    default the output's format (or, without one, the output's format one of its values)."""
+    inputs = obj(card.get("inputs"))
+    found: list[str] = []
+    for out_name, out in obj(card.get("outputs")).items():
+        by = obj(out).get("controls")
+        if by is None:
+            continue
+        where = f"outputs.{out_name}.controls"
+        given = obj(inputs.get(by)) if isinstance(by, str) else {}
+        values = _enum_of(given)
+        if not given or not values or not all(isinstance(v, str) for v in values):
+            found.append(
+                f"{where}: {_flow(by)} must be an enum input of the card whose values are formats, "
+                f"like format: {{enum: [wav, mp3], default: wav}}"
+            )
+            continue
+        bad = [str(v) for v in values if v not in OUTPUT_FORMATS]
+        if bad:
+            found.append(
+                f"inputs.{by}: {', '.join(bad)}: no format an output may have (png, mp4, wav, mp3, "
+                "json, txt, npy, ...)"
+            )
+        fmt, default = _format(out), given.get("default")
+        if default is not None and default != fmt:
+            found.append(f"outputs.{out_name}.format: {default}, the default of input {by}")
+        elif fmt not in values:
+            found.append(
+                f"outputs.{out_name}.format: one of the values of input {by} ({_flow(values)})"
+            )
+    return found
+
+
+def chosen_formats(card: dict[str, Any], params: Any) -> dict[str, str]:
+    """Each output's format in a call of these params (`run --local` checks the file by it):
+    its own, or the value the call gave the input that chooses it (`controls`), that input's
+    default when left out."""
+    inputs = obj(card.get("inputs"))
+    told: dict[str, str] = {}
+    for out_name, out in obj(card.get("outputs")).items():
+        fmt, by = _format(out), obj(out).get("controls")
+        if isinstance(by, str):
+            value = obj(params).get(by, obj(inputs.get(by)).get("default"))
+            if isinstance(value, str) and value in OUTPUT_FORMATS:
+                fmt = value
+        if fmt:
+            told[out_name] = fmt
+    return told
 
 
 def test_problems(card: dict[str, Any]) -> list[str]:
@@ -549,6 +619,13 @@ def spec_of(card: dict[str, Any]) -> dict[str, Any]:
             for k, v in outputs.items()
         },
     }
+    # An output whose format an input chooses: said on that input, as AMSYOS keeps it
+    # (kernel/manifest.py `InputSpec.format_of`); the output keeps its own format.
+    for out_name, out in outputs.items():
+        by = obj(out).get("controls")
+        if isinstance(by, str) and isinstance(spec["inputs"].get(by), dict):
+            chooser = spec["inputs"][by]
+            chooser["format_of"] = [*seq(chooser.get("format_of")), out_name]
     if card.get("example") is not None:
         spec["example"] = card["example"]
     if card.get("effect"):
@@ -1266,6 +1343,25 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
         if means == "image" and any(w in out_name for w in ("chart", "plot", "graph")):
             means = "image.chart"
         outputs[out_name] = {"type": "file", "format": fmt, "means": means}
+    for out_name, param in found.chosen.items():
+        given = inputs.get(param)
+        if given is None:
+            continue  # named by something that is no input: nothing a call chooses
+        values = seq(given.get("enum"))
+        formats = [v for v in values if isinstance(v, str) and v in OUTPUT_FORMATS]
+        if values and len(formats) == len(values):
+            fmt = given["default"] if given.get("default") in formats else formats[0]
+            means = MEANS_OF_FORMAT.get(fmt, "document")
+            outputs[out_name] = {"type": "file", "format": fmt, "controls": param, "means": means}
+            continue
+        outputs[out_name] = {
+            "type": "file", "format": f"{FILL}: its format when {param} is left out>",
+            "controls": param, "means": f"{FILL}: what the file is: audio, image, data...>",
+        }  # fmt: skip
+        notes.append(
+            f"outputs.{out_name}: the code writes it in the format {param} names: make {param} "
+            f"an enum of formats ({param}: {{enum: [wav, mp3], default: wav}})"
+        )
     example = example_for(root, inputs)
     read = sorted(found.how) or ["file names only"]
     notes.append(
@@ -1607,6 +1703,7 @@ def render(card: dict[str, Any]) -> str:
         "",
         "# outputs: what a call makes, one file each: {type: file, format: png, means: image};",
         "#   the program writes out/<name>.<format>. means patch: a unified diff (--apply).",
+        "#   controls: <an enum input of formats>: the call chooses the file's format.",
     ]
     outputs = obj(card.get("outputs"))
     lines.append("outputs:" + ("" if outputs else " {}"))

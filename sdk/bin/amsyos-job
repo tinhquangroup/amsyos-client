@@ -10,6 +10,8 @@ modules `amsyos` do for Python and Node:
                                        string as it is, anything else as JSON
     amsyos-job input <name>            the path of the input file, or nothing
     amsyos-job input-name <name>       the name it was uploaded with, or nothing
+    amsyos-job service                 the id of the service the job is for, or nothing
+    amsyos-job service-version         that service's version, or nothing
     amsyos-job output <name> [.ext]    the path to write the output <name> to
     amsyos-job progress <0-100>        how far the job is
     amsyos-job fail <hint> [code]      ends the job as failed (writes error.json, exits 1);
@@ -58,6 +60,19 @@ def folder() -> Path:
 
 def told() -> dict:
     return json.loads((folder() / "job.json").read_text())
+
+
+def service_of(job: dict) -> tuple:
+    """(id, version) of `service`: {"id", "version"}; an older node wrote the id alone,
+    with `version` beside it; an older space, `service_id` and `service_version`."""
+    given = job.get("service")
+    if isinstance(given, dict):
+        pair = given.get("id"), given.get("version")
+    elif isinstance(given, str):
+        pair = given, job.get("version")
+    else:
+        pair = job.get("service_id"), job.get("service_version")
+    return tuple(x if isinstance(x, str) and x else None for x in pair)
 
 
 def wrong(why: str) -> None:
@@ -140,6 +155,10 @@ def main(args: list[str]) -> None:
         name = (told().get("input_names") or {}).get(rest[0])
         if name:
             print(name)
+    elif what in ("service", "service-version") and not rest:
+        said = service_of(told())[what == "service-version"]
+        if said:
+            print(said)
     elif what == "output" and len(rest) in (1, 2):
         suffix = rest[1] if len(rest) == 2 else ""
         if suffix and not suffix.startswith("."):

@@ -6,8 +6,10 @@ It runs the organisation's own code on the organisation's own computer, where it
 already runs it: never on AMSYOS's machines, and nothing is sent to AMSYOS or asked of it.
 
 What the space does (services/space/machine/space_run.py, sdk/CONTRACT.md §3), here:
-- a job folder: `job.json` ({"params", "inputs", "input_names", ...}) from the card's
-  `example` (params `k=v` change it), its defaults filled in; an `@path` file copied to
+- a job folder: `job.json` ({"params", "inputs", "input_names", "service", ...}) from the
+  card's `example` (params `k=v` change it), its defaults filled in (`service.id` is the
+  card's own name: on AMSYOS it begins with `t_<organisation>.`, which nothing here asks
+  AMSYOS for); an `@path` file copied to
   `in/<input>.<ext>` as the driver names it (drivers/base.py `InputFile.job_path`);
   `out/`, `tmp/`;
 - the card's `command` (or its `serve`, by the protocol of contract 1) started in a copy
@@ -265,10 +267,12 @@ def _job_folder(
         if PLAIN_NAME.fullmatch(source.name):
             names[name] = source.name
     version = cards.full_version(str(card.get("version") or "0.0"))
+    service = str(card.get("service") or "")
     told: dict[str, Any] = {
-        "job_id": job_id, "service_id": str(card.get("service") or ""),
+        "job_id": job_id, "service_id": service,
         "service_version": version, "params": params, "max_runtime_s": LIMIT_S,
         "inputs": inputs, "image": f"{cards.image_of(card)}@{version}",
+        "service": {"id": service, "version": version},
     }  # fmt: skip
     if names:
         told["input_names"] = names
@@ -849,8 +853,9 @@ def run_here(
         out.note(note)
     given = given or {}
     _card_for_here(card, given)
-    declared = {k: str(v) for k, v in obj(cards.spec_of(card).get("outputs")).items()}
     params, sources, fixed = _params(card, root, given, files or {})
+    # Each output's format in this call: an input may choose it (`controls`).
+    declared = cards.chosen_formats(card, params)
     for line in fixed:
         out.note(line)
     sdk = sdk_dir()

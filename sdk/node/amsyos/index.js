@@ -10,6 +10,7 @@
  *   const text = job.params.text;            // the request's params, defaults filled in
  *   const picture = job.input("image");      // an input file's path, or null
  *   job.inputName("image");                  // the name it was uploaded with, or null
+ *   job.service, job.serviceVersion;         // which service the job is for, or null
  *   job.progress(40);                        // 0 to 100, optional
  *   fs.writeFileSync(job.output("result", ".txt"), text);   // one file an output
  *   job.fail("the picture is too small");    // ends the job with a hint
@@ -20,6 +21,8 @@
  *   const { job, serve } = require("amsyos");
  *   const model = load();                    // once, not once a job
  *   serve(async (job) => { fs.writeFileSync(job.output("result", ".txt"), model(job.params.text)); });
+ *
+ * A served image several services share tells their jobs apart by `job.service`.
  *
  * Each job is a line on stdin and its end a line on stdout (what `serve` reads and
  * writes); what the handler prints goes to stderr, the job's log. `job.fail` ends only
@@ -43,7 +46,7 @@ class Job {
     this._serving = false;
   }
 
-  /** job.json as it is: {params, inputs}. */
+  /** job.json as it is: {params, inputs, input_names, service, ...}. */
   get told() {
     if (this._told === null) {
       this._told = JSON.parse(fs.readFileSync(path.join(this.folder, "job.json"), "utf8"));
@@ -54,6 +57,17 @@ class Job {
   /** The request's params, as the manifest's inputs name them. */
   get params() {
     return this.told.params || {};
+  }
+
+  /** The id of the service the job is for ("t_42.media.tts"), or null when job.json does
+   * not say it: an image several services share tells their jobs apart by it. */
+  get service() {
+    return serviceOf(this.told)[0];
+  }
+
+  /** The version of that service ("1.2.0"), or null when job.json does not say it. */
+  get serviceVersion() {
+    return serviceOf(this.told)[1];
   }
 
   /** The path of the file given for the input `name`, or null when none was. */
@@ -126,6 +140,22 @@ class Job {
       fs.writeFileSync(error, JSON.stringify({ error: "SERVICE_ERROR", hint }));
     }
   }
+}
+
+/** [id, version] of `service`: {id, version}; an older node wrote the id alone, with
+ * `version` beside it; an older space, `service_id` and `service_version`. */
+function serviceOf(told) {
+  const given = told.service;
+  let id, version;
+  if (given && typeof given === "object") {
+    [id, version] = [given.id, given.version];
+  } else if (typeof given === "string") {
+    [id, version] = [given, told.version];
+  } else {
+    [id, version] = [told.service_id, told.service_version];
+  }
+  const text = (x) => (typeof x === "string" && x ? x : null);
+  return [text(id), text(version)];
 }
 
 /** One line to the machine on fd 1, whole (a pipe Node made non-blocking may say EAGAIN). */

@@ -122,11 +122,12 @@ The links are signed by the kernel for this job and this node only, and expire.
   could serve: the software found). The list lives on the machine. The kernel sends params
   and file links only: never code, never a command to install anything.
 - **A job** is contract 1 (`sdk/CONTRACT.md` §3): its folder holds `job.json`
-  (`{"job", "service", "version", "params", "inputs": {"<name>": "in/<file>"}}`), `in/`,
+  (`{"job", "service": {"id", "version"}, "version", "params", "inputs": {"<name>":
+  "in/<file>"}}`; a node before 2026-11-23 wrote `service` as the id alone), `in/`,
   `out/`, optional `progress` and `error.json`; `$AMSYOS_JOB` names the folder; the command
   runs in the service's folder. The node program is also `amsyos-job`
-  (`amsyos-node job <params|param|input|output|progress|fail> …`, and a copy named
-  `amsyos-job` on the job's `PATH`).
+  (`amsyos-node job <params|param|input|service|service-version|output|progress|fail> …`,
+  and a copy named `amsyos-job` on the job's `PATH`).
 - **The folders above a job.** A program that walks its own path (Node.js resolving its
   script, PowerShell setting its start location) reads the attributes of every folder above
   it. On Windows `setup` lets the job account pass through, and read the attributes of, the

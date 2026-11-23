@@ -31,7 +31,7 @@ Each call is one run of the image's `command` in its source folder, as an unpriv
 
 | Path | What |
 |---|---|
-| `job.json` | `{"params": {...}, "inputs": {"<name>": "in/<file>"}}`: params checked, defaults filled in |
+| `job.json` | `{"params": {...}, "inputs": {"<name>": "in/<file>"}, "service": {"id", "version"}}`: params checked, defaults filled in; `service` says which service the job is for (an image several services share tells their jobs apart by it; additive, a job may ignore it) |
 | `in/` | the input files |
 | `out/<output>.<ext>` | one file an output, as the card declares it; at most 2 GB in all a job: over it the job fails `OUTPUT_TOO_BIG`, naming each file and its size (empty files and files over it are not kept as a failed job's partial files) |
 | `progress` | optional, 0 to 100 |
@@ -50,9 +50,9 @@ A static binary shipped in the archive needs no runtime. Exactly what was instal
 
 | Language | Use |
 |---|---|
-| Python | `from amsyos import job`: `job.params`, `job.input(name)`, `job.output(name, ".png")`, `job.progress(40)`, `job.fail(hint)` |
-| Node | `const { job } = require("amsyos")` (or `import { job } from "amsyos"`): the same surface |
-| Any other | the command `amsyos-job`: `params`, `param <name> [--raw]`, `input <name>`, `output <name> [.ext]`, `progress <n>`, `fail <hint> [code]` |
+| Python | `from amsyos import job`: `job.params`, `job.input(name)`, `job.output(name, ".png")`, `job.progress(40)`, `job.fail(hint)`, `job.service` and `job.service_version` |
+| Node | `const { job } = require("amsyos")` (or `import { job } from "amsyos"`): the same surface (`job.serviceVersion`) |
+| Any other | the command `amsyos-job`: `params`, `param <name> [--raw]`, `input <name>`, `output <name> [.ext]`, `progress <n>`, `fail <hint> [code]`, `service`, `service-version` |
 
 Following the folder layout by hand is just as good.
 

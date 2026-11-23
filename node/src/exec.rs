@@ -102,7 +102,8 @@ pub struct JobDir {
     pub real: PathBuf,
 }
 
-/// Makes the job's folder and writes `job.json`.
+/// Makes the job's folder and writes `job.json`: `service` says which service the job is for
+/// ({"id", "version"}, contract 1 §3); `version` beside it, as an older node wrote it.
 pub fn prepare(
     root: &Path,
     id: &str,
@@ -113,7 +114,10 @@ pub fn prepare(
 ) -> Result<JobDir, String> {
     let real = sys::prepare_job_dir(root, id)?;
     let jd = JobDir { dir: root.join(id), real };
-    let told = json!({"job": id, "service": service, "version": version, "params": params, "inputs": inputs});
+    let told = json!({
+        "job": id, "service": {"id": service, "version": version}, "version": version,
+        "params": params, "inputs": inputs,
+    });
     let path = jd.dir.join("job.json");
     std::fs::write(&path, told.to_string()).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     sys::job_may_read(&path);

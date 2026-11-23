@@ -6,8 +6,10 @@
    `node_modules`, `__pycache__` or what `.gitignore` lists, never an agent's instruction
    file (CLAUDE.md, AGENTS.md, a top-level *.md the card does not name: v3 T2 packed
    them), and never a credentials file (refused); the files are printed, names and
-   sizes, with what was left out, before anything is sent (`--dry-run` stops there;
-   `card.PACK_RULES` says it to the reader);
+   sizes, with what was left out, before anything is sent (`--dry-run` stops there, and
+   says the disk the build needs against what the space's machine has free: the models,
+   as Hugging Face's public API sizes their files, and PyTorch for a Blackwell GPU when
+   the code imports torch; `card.PACK_RULES` says it to the reader);
 3. upload what the workspace lacks (`asset.has`): the archive and the example's files;
 4. open the organisation's space when none is open and `space.auto` would not open it;
 5. `space.build` with the card as its `service`, `source` and `channel` where the
@@ -36,6 +38,8 @@ import tarfile
 import time
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from amsyos_cli import card as cards
 from amsyos_cli import repo
@@ -76,6 +80,19 @@ CHECKS = "checks.json"  # check job → service@version of the deploys made here
 _VOTED = re.compile(
     r'"service": "(t_[a-z0-9_]+(?:\.[a-z][a-z0-9_]*){1,4})", "version": "(\d+\.\d+\.\d+)"'
 )
+# What a build takes of the machine's disk (`--dry-run`): a model, `owner/name@<40 hex>`
+# maybe with the files it fetches (`:<pattern>,...`), sized as the kernel sizes it (Hugging
+# Face's public API, no token); PyTorch for a Blackwell GPU (compute capability 10.0 and
+# up), installed once a machine when the code imports torch (space_build.py).
+HF_MODELS = "https://huggingface.co/api/models"
+HF_TIMEOUT_S = 10.0
+_MODEL = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})@([0-9a-f]{40})"
+    r"(?::([A-Za-z0-9_.*?/\[\],-]{1,900}))?"
+)
+TORCH_GB = 7.0
+_USES_TORCH = re.compile(rb"^\s*(?:import|from)\s+torch\b", re.MULTILINE)
+_MOST_SCANNED = 400  # Python files looked at for `import torch`, as the build does
 
 
 # ---------------------------------------------------------------- what is packed
@@ -452,11 +469,13 @@ def gpu_for(card: dict[str, Any], gpu: str | None) -> str | None:
     return "none" if str(obj(card.get("resources")).get("gpu") or "none") == "none" else None
 
 
-async def space_ready(api: Api, hours: float, gpu: str | None = None) -> tuple[bool, str]:
+async def space_ready(
+    api: Api, hours: float, gpu: str | None = None, shown: dict[str, Any] | None = None
+) -> tuple[bool, str]:
     """Whether a build can have its space, said in one line before anything is uploaded
     (Claude Code for a customer, 2026-11-20: deploy uploaded the source and the example, then
-    space.open was refused). Free: `space.show`."""
-    shown = await api.instant("space.show")
+    space.open was refused). Free: `space.show` (`shown`: its answer, already asked)."""
+    shown = await api.instant("space.show") if shown is None else shown
     if shown.get("enabled") is False:
         why = str(shown.get("next") or "spaces are not switched on for your organisation")
         return False, f"space: {cli_hint(why)}"
@@ -476,6 +495,139 @@ async def space_ready(api: Api, hours: float, gpu: str | None = None) -> tuple[b
     return True, f"space: none open; deploy opens one{kind} for {hours:g} h{held} (--hours)"
 
 
+def wanted(path: str, patterns: list[str]) -> bool:
+    """Whether a model's file is fetched: all without patterns, else one a pattern matches
+    as huggingface_hub's `allow_patterns` (fnmatchcase, '*' across '/', 'dir/' a folder)."""
+    return not patterns or any(
+        fnmatch.fnmatchcase(path, f"{p}*" if p.endswith("/") else p) for p in patterns
+    )
+
+
+async def model_sizes(models: list[str]) -> list[dict[str, Any]]:
+    """Each model with the bytes of the files it fetches (`bytes` None: not known, `why`),
+    from Hugging Face's public API as the kernel asks it, with no token."""
+    rows: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=HF_TIMEOUT_S, follow_redirects=True) as http:
+        for entry in models[:8]:
+            found = _MODEL.fullmatch(entry)
+            if found is None:
+                rows.append({"model": entry, "bytes": None, "why": "not owner/name@<40 hex>"})
+                continue
+            repo, commit, patterns = (
+                found[1],
+                found[2],
+                [p for p in (found[3] or "").split(",") if p],
+            )
+            row: dict[str, Any] = {"model": repo, "bytes": None}
+            if patterns:
+                row["only"] = patterns
+            try:
+                got = await http.get(
+                    f"{HF_MODELS}/{repo}/revision/{commit}", params={"blobs": "true"}
+                )
+                siblings = seq(obj(got.json()).get("siblings")) if got.status_code == 200 else []
+            except (httpx.HTTPError, ValueError):
+                siblings = []
+            if not siblings:
+                row["why"] = "Hugging Face did not size it"
+                rows.append(row)
+                continue
+            files = [obj(s) for s in siblings if wanted(str(obj(s).get("rfilename", "")), patterns)]
+            row["bytes"] = sum(int(f.get("size") or 0) for f in files)
+            if patterns and not files:
+                row["why"] = "no file matches its patterns: the build is refused"
+            rows.append(row)
+    return rows
+
+
+def uses_torch(root: Path, made: dict[str, Any]) -> bool:
+    """Whether the build installs PyTorch for the GPU: the code imports torch and its
+    packages name no torch of their own (space_build.py `_uses_torch`)."""
+    named = str(obj(made["build"]).get("packages") or "").lower().split()
+    if any(re.match(r"torch\b", p) for p in named):
+        return False
+    scanned = [str(f["file"]) for f in made["files"] if str(f["file"]).endswith(".py")]
+    for rel in scanned[:_MOST_SCANNED]:
+        try:
+            if _USES_TORCH.search((root / rel).read_bytes()[:400_000]):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _torch_need(space: dict[str, Any]) -> tuple[float | None, str]:
+    """PyTorch for the GPU on the space's machine: (GB, why); GB None when the GPU is not
+    known yet (no space open: a Blackwell one takes it)."""
+    if not space.get("job"):
+        return None, f"about {TORCH_GB:g} GB if the space's GPU is a Blackwell, once a machine"
+    if str(space.get("machine") or "").startswith("CPU"):
+        return 0.0, "a CPU space: the machine's own"
+    compute = obj(space.get("gpu")).get("compute")
+    try:
+        cap = float(str(compute)) if compute is not None else None
+    except ValueError:
+        cap = None
+    if cap is None:
+        return None, f"about {TORCH_GB:g} GB if the machine's GPU is a Blackwell, once a machine"
+    if cap < 10.0:
+        return 0.0, f"the machine's own fits its GPU, compute {compute}"
+    if seq(obj(space.get("machine_disk")).get("shared_pytorch")):
+        return 0.0, "on the machine already, shared by its images"
+    return TORCH_GB, "installed once on this machine, then shared by its images"
+
+
+async def disk_need(
+    root: Path, made: dict[str, Any], shown: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """The disk a build needs (its models, PyTorch for the GPU) against what the space's
+    machine has free (`space.show`), and the line that says it."""
+    models = str(obj(made["build"]).get("models") or "").split()
+    rows = await model_sizes(models) if models else []
+    models_gb = sum(r["bytes"] or 0 for r in rows) / 1e9
+    space = obj(shown.get("space"))
+    torch_gb, torch_why = _torch_need(space) if uses_torch(root, made) else (0.0, "")
+    need = models_gb + (torch_gb or 0.0)
+    disk = obj(space.get("machine_disk"))
+    free = disk.get("free_gb") if isinstance(disk.get("free_gb"), int | float) else None
+    told: dict[str, Any] = {
+        "need_gb": round(need, 1), "models_gb": round(models_gb, 1),
+        "models": [{**r, "gb": None if r["bytes"] is None else round(r["bytes"] / 1e9, 2)}
+                   for r in rows],
+    }  # fmt: skip
+    if torch_why:
+        told["pytorch_gb"], told["pytorch"] = torch_gb, torch_why
+    bits = [
+        f"{r['model']} "
+        + ("size not known" if r["bytes"] is None else f"{r['bytes'] / 1e9:.1f} GB")
+        + (f", only {','.join(r['only'])}" if r.get("only") else "")
+        + (f" ({r['why']})" if r.get("why") else "")
+        for r in rows
+    ]
+    if torch_why:  # not counted when the GPU is not known: its line says what it takes
+        bits.append(
+            f"PyTorch for the GPU: {torch_why}"
+            if torch_gb is None
+            else f"PyTorch for the GPU {torch_gb:g} GB ({torch_why})"
+        )
+    line = f"disk: the build needs about {need:.1f} GB" + (f" ({'; '.join(bits)})" if bits else "")
+    if free is None:
+        told["fits"] = None
+        line += "; the machine's free disk is not known until its space is up"
+    else:
+        told["free_gb"], told["total_gb"] = free, disk.get("total_gb")
+        told["fits"] = need <= free
+        line += f"; the machine has {free} GB free of {disk.get('total_gb')}"
+        if need > free:
+            line += (
+                ": not enough. Free room with amsyos space clean (alone it lists what is on the "
+                "machine), or fetch only the files the code loads (a model's ':<pattern>,...')"
+            )
+    if models:
+        line += "; a model already on the machine takes no more"
+    return told, line
+
+
 async def dry_run(api: Api | None, out: Out, root: Path, channel: str, hours: float = 1.0) -> int:
     """What deploy would send and make, with nothing sent (read-only calls when logged in)."""
     made = plan(root)
@@ -491,8 +643,11 @@ async def dry_run(api: Api | None, out: Out, root: Path, channel: str, hours: fl
     if answer["example_files"]:
         lines.append("example files uploaded too: " + ", ".join(answer["example_files"]))
     if api is not None:
-        ok, said = await space_ready(api, hours, gpu_for(card, None))
+        shown = await api.instant("space.show")
+        ok, said = await space_ready(api, hours, gpu_for(card, None), shown=shown)
         answer["space_ready"] = ok
+        lines.append(said)
+        answer["disk"], said = await disk_need(root, made, shown)
         lines.append(said)
         service_id = f"{await tenant_of(api)}.{card['service']}"
         current, _ = await _defined(api, service_id)
@@ -507,6 +662,8 @@ async def dry_run(api: Api | None, out: Out, root: Path, channel: str, hours: fl
             f"channel {channel}"
         )
     else:
+        answer["disk"], said = await disk_need(root, made, {})
+        lines.append(said)
         lines.append(f"would build {card['service']} (not logged in: the version is not known)")
     lines.append("nothing was sent (--dry-run)")
     out.emit(answer, *lines)

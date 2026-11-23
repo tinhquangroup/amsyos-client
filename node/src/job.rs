@@ -17,6 +17,8 @@ const USAGE: &str = "\
     amsyos-job param <name> [--raw]    one param as JSON (null when absent); --raw: a
                                        string as it is, anything else as JSON
     amsyos-job input <name>            the path of the input file, or nothing
+    amsyos-job service                 the id of the service the job is for, or nothing
+    amsyos-job service-version         that service's version, or nothing
     amsyos-job output <name> [.ext]    the path to write the output <name> to
     amsyos-job progress <0-100>        how far the job is
     amsyos-job fail <hint> [code]      ends the job as failed (writes error.json, exits 1);
@@ -37,6 +39,17 @@ fn told() -> Result<Value, String> {
     let path = folder().join("job.json");
     let body = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     serde_json::from_slice(&body).map_err(|e| format!("{} is not JSON: {e}", path.display()))
+}
+
+/// The id and version of the service the job is for: `service` is {"id", "version"}; an
+/// older node wrote the id alone, with `version` beside it.
+fn service_of(job: &Value) -> (Option<String>, Option<String>) {
+    let text = |v: Option<&Value>| v.and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+    match job.get("service") {
+        Some(Value::Object(o)) => (text(o.get("id")), text(o.get("version"))),
+        Some(id) if id.is_string() => (text(Some(id)), text(job.get("version"))),
+        _ => (None, None),
+    }
 }
 
 fn plain(name: &str) -> bool {
@@ -73,6 +86,12 @@ fn run(args: &[String]) -> Result<i32, String> {
             let job = told()?;
             if let Some(rel) = job.get("inputs").and_then(|i| i.get(&rest[0])).and_then(Value::as_str) {
                 println!("{}", folder().join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)).display());
+            }
+        }
+        ("service", 0) | ("service-version", 0) => {
+            let (id, version) = service_of(&told()?);
+            if let Some(said) = if what == "service" { id } else { version } {
+                println!("{said}");
             }
         }
         ("output", 1) | ("output", 2) => {
