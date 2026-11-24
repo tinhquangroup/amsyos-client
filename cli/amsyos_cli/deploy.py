@@ -1478,6 +1478,20 @@ def _on_node(card: dict[str, Any]) -> bool:
     return card.get("where", "space") == "node"
 
 
+def _unnamed(card: dict[str, Any]) -> bool:
+    """A card with no `image:` line: its image is its service's name, its own (a customer,
+    2026-11-25: sub-cards a former tool gave the shared image by a flag named none)."""
+    named = card.get("image")
+    return not (isinstance(named, str) and cards.IMAGE_RE.fullmatch(named))
+
+
+def _share_hint(dirs: list[str], image: str) -> str:
+    return (
+        f"{', '.join(dirs[:6])}: no image: line, so each card's image is its service's name; "
+        f"give {'it' if len(dirs) == 1 else 'each'} `image: {image}` to share that image"
+    )
+
+
 def _cards_below(
     root: Path, files: list[str]
 ) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
@@ -1609,10 +1623,12 @@ def shared_top(
                 f"no {cards.CARD} in {root}, and no card below it says where: node: a rented "
                 "node's card deploys from its own folder (amsyos deploy --dir <its folder>)",
             )
+        alone = [f for f, c in found if _on_node(c) and _unnamed(c) and _named_image(c)]
         raise CliError(
             "INVALID_PARAMS",
             f"no {cards.CARD} in {root}, and the cards below it name {len(images)} images on an "
-            f"own node: {listed}; choose one with --image <name> (or --only <folders>)",
+            f"own node: {listed}; choose one with --image <name> (or --only <folders>)"
+            + (f"; {_share_hint(alone, '<one name>')}" if alone else ""),
             {"images": images},
         )
     for named, dirs in sorted(images.items()):
@@ -1712,8 +1728,11 @@ def node_cards(
     notes: list[str] = [str(n) for n in seq(made.get("notes"))]
     found, unread = _cards_below(root, [str(r["file"]) for r in made["files"]])
     notes += unread
+    unnamed: list[str] = []  # cards on an own node that name no image: each its own
     for folder, card in found:
         if _named_image(card) != image:
+            if _on_node(card) and _unnamed(card) and _named_image(card) is not None:
+                unnamed.append(folder)
             continue
         if not _on_node(card):
             notes.append(
@@ -1722,6 +1741,8 @@ def node_cards(
             )
             continue
         group.append({"dir": folder, "root": root / folder, "card": card, "on_node": True})
+    if unnamed:
+        notes.append(_share_hint(unnamed, image) + " (left out)")
     problems: list[str] = []
     chosen = [e for e in group if e["on_node"]]
     if only:
@@ -1746,6 +1767,9 @@ def node_cards(
                 f"--only: no card of the image {image} with where: node at "
                 f"{', '.join(unknown)}; {theirs}"
             )
+            own = [u for u in unknown if u in unnamed]
+            if own:
+                problems.append(_share_hint(own, image))
         chosen = [e for e in chosen if e["dir"] in asked]
     if not chosen and not problems:
         problems.append(f"no card of the image {image} says where: node")
