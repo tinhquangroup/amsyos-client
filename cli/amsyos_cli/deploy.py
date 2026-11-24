@@ -25,7 +25,15 @@ several), steps 4-5 are instead: build the environment and the image on that nod
 the command `sh _node/run.sh <image> '<command>'`, then `service.define` with `compute: node`,
 whose check runs the example there. `--dry-run` plans those steps; an own node costs nothing.
 The cards below the top one that name its image (`where: node` too) go with it: one build,
-then `node.deploy`, `service.define` and the check for each (`--only` picks some).
+then `node.deploy`, `service.define` and the check for each (`--only` picks some). The top
+card may be `where: space` (it deploys on the rented node; `--only` its own-node cards), or
+missing: cards side by side below a folder with none share its code (`--image` picks one
+image). When only cards changed since the node's image was built, there is no build: a card
+deployed there with the same command is only defined again, any other gets `node.deploy`
+from that image (`.amsyos/state/node.json` keeps what is on the node).
+
+Before anything is uploaded or built, AMSYOS's `service.check` (free) checks each card's
+spec, every problem of every card in one answer.
 
 Exit 0: defined, its check passed or still running (said with its job); 1: a real failure,
 with its hint. The version is the card's major.minor with the patch counted (one more than
@@ -55,13 +63,14 @@ from amsyos_cli import card as cards
 from amsyos_cli import repo
 from amsyos_cli.api import Api, idempotency_key, refused_field
 from amsyos_cli.common import CliError, Credentials, Out, amount, obj, seq, short
-from amsyos_cli.files import fetch_text, human, upload
+from amsyos_cli.files import fetch_text, held, human, sha256_of, upload
 from amsyos_cli.jobs import check_lines, follow, status_lines
 from amsyos_cli.shell import cli_hint
 
 MOST_ARCHIVE_BYTES = 200 * 1024 * 1024  # node.build: at most 200 MB
 MOST_ARCHIVE_FILES = 5000
 STATE = Path(".amsyos") / "state" / "deploy.json"
+NODE_STATE = "node.json"  # an own node's: the code its image was built from, the cards there
 NEVER_DIRS = frozenset({"out", "node_modules", "__pycache__"}) | cards.SKIP_DIRS
 # Files that hold credentials by their name: refused, never packed (spec v3 §12).
 SECRET_NAMES = frozenset({
@@ -253,13 +262,17 @@ def pack(root: Path, files: list[str]) -> bytes:
     return gzip.compress(raw.getvalue(), mtime=0)
 
 
-def plan(root: Path) -> dict[str, Any]:
+def plan(root: Path, shared: dict[str, Any] | None = None) -> dict[str, Any]:
     """Everything deploy can know here, before any call: the card checked, the files, the
-    archive and its fingerprint."""
-    card = cards.load(root)
-    wrong = cards.problems(card)
-    left = cards.example_problems(card)
-    wrong += [p for p in cards.left_to_fill(card) if p not in wrong and p not in left]
+    archive and its fingerprint. `shared`: the card that stands for a folder with none of
+    its own, whose cards below share its code (`shared_top`)."""
+    card = shared if shared is not None else cards.load(root)
+    wrong: list[str] = []
+    left: list[str] = []
+    if shared is None:  # the cards below are checked one by one (node_cards)
+        wrong = cards.problems(card)
+        left = cards.example_problems(card)
+        wrong += [p for p in cards.left_to_fill(card) if p not in wrong and p not in left]
     if wrong or left:
         raise CliError(
             "INVALID_CARD" if wrong else "INVALID_PARAMS",
@@ -353,17 +366,85 @@ def next_version(asked: str, current: str | None) -> str:
     )
 
 
-def _read_state(root: Path) -> dict[str, Any]:
+def _read_state(root: Path, name: str = STATE.name) -> dict[str, Any]:
     try:
-        told: Any = json.loads((root / STATE).read_text(encoding="utf-8"))
+        told: Any = json.loads((root / repo.STATE_DIR / name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return obj(told)
 
 
-def _write_state(root: Path, state: dict[str, Any]) -> None:
+def _write_state(root: Path, state: dict[str, Any], name: str = STATE.name) -> None:
     folder, _ = repo.state_dir(root)
-    (folder / STATE.name).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    (folder / name).write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _read_node_state(root: Path) -> dict[str, Any]:
+    """The own node's deploys here (`node.json`); CLI 0.5.4 kept them in deploy.json."""
+    told = _read_state(root, NODE_STATE)
+    if told:
+        return told
+    before = _read_state(root)
+    return before if before.get("node") else {}
+
+
+# ---------------------------------------------------------------- AMSYOS's check of a card
+async def check_card(
+    api: Api, card: dict[str, Any], root: Path, *, compute: str | None = None
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """`service.check` of the spec the card becomes; nothing is defined (free). An example's
+    local file (from `root`) goes as the workspace's own asset when it holds that content
+    (`asset.has`, read-only), else as a placeholder whose problem is left out: deploy uploads
+    the file first. With `compute` ('node'), the spec is checked as service.define gets it,
+    else as a build's `service`. (answer, the example's files left to deploy)"""
+    service = cards.for_check(card)
+    local = cards.local_files(card.get("example"))
+    pending: dict[str, str] = {}
+    if local:
+        digests = {k: sha256_of(root / p) for k, p in local.items() if (root / p).is_file()}
+        have = await held(api, sorted(set(digests.values())))
+        example = obj(service["spec"].get("example"))
+        for name, path in local.items():
+            ref = have.get(digests.get(name, ""))
+            if ref:
+                example[name] = ref
+            else:
+                pending[name] = path
+    if compute:
+        params = {
+            "spec": json.dumps({**service["spec"], "compute": compute}),
+            "name": str(service["name"]),
+            "version": str(service.get("version") or ""),
+        }
+        params = {k: v for k, v in params.items() if v}
+    else:
+        params = {"spec": json.dumps(service)}
+    told = await api.instant("service.check", params)
+    problems = [str(p) for p in seq(told.get("problems"))]
+    if pending:
+        kept = [p for p in problems if cards.EXAMPLE_FILE not in p]
+        if len(kept) < len(problems):
+            told = {**told, "problems": kept, "ok": not kept, "left_to_deploy": pending}
+    return told, pending
+
+
+async def checked_problems(
+    api: Api, entries: list[dict[str, Any]], compute: str | None
+) -> list[str]:
+    """Each card's problems that AMSYOS's `service.check` finds and were not found here,
+    by card, before anything is uploaded or built (a customer, 2026-11-25: an output format
+    no check reads and a description over 200 characters were found at service.define,
+    after a build)."""
+    found: list[str] = []
+    for entry in entries:
+        card: dict[str, Any] = entry["card"]
+        if not cards.NAME_RE.fullmatch(str(card.get("service"))):
+            continue  # its own problem, said already
+        told, _ = await check_card(api, card, entry["examples"], compute=compute)
+        here = cards.problems(card) + cards.example_problems(card) + cards.left_to_fill(card)
+        said = cards.server_problems([str(p) for p in seq(told.get("problems"))], here)
+        found += [f"{_at(entry)}{p}" for p in said]
+    return found
 
 
 # ---------------------------------------------------------------- a version's check
@@ -647,15 +728,16 @@ async def dry_run(
     *,
     node: str | None = None,
     only: list[str] | None = None,
+    image: str | None = None,
+    force: bool = False,
 ) -> int:
     """What deploy would send and make, with nothing sent (read-only calls when logged in)."""
     root, only = from_top(out, root, only)
-    made = plan(root)
+    made = plan_at(root, image, only)
     card = made["card"]
-    if card.get("where", "space") == "node":
-        return await dry_run_node(api, out, root, made, channel, node, only)
-    if only:
-        raise CliError("INVALID_PARAMS", ONLY_SPACE)
+    if _on_node(card) or only:
+        return await dry_run_node(api, out, root, made, channel, node, only, force=force)
+    on_node = _node_line(root, made)
     answer: dict[str, Any] = {
         "dry_run": True, "service": card["service"], "files": made["files"],
         "left_out": made["left_out"],
@@ -666,7 +748,13 @@ async def dry_run(
     lines = file_lines(made, every=True)
     if answer["example_files"]:
         lines.append("example files uploaded too: " + ", ".join(answer["example_files"]))
+    if on_node:
+        answer["node_cards"] = on_node[0]
+        lines.append(on_node[1])
     if api is not None:
+        wrong = await checked_problems(api, [{"dir": ".", "card": card, "examples": root}], None)
+        if wrong:
+            raise CliError("INVALID_CARD", "; ".join(wrong), {"problems": wrong})
         shown = await api.instant("node.show")
         ok, said = await space_ready(api, hours, gpu_for(card, None), shown=shown)
         answer["space_ready"] = ok
@@ -708,18 +796,20 @@ async def deploy(
     channel: str = "dev",
     node: str | None = None,
     only: list[str] | None = None,
+    image: str | None = None,
 ) -> int:
     root, only = from_top(out, root, only)
-    made = plan(root)
+    made = plan_at(root, image, only)
     card: dict[str, Any] = made["card"]
-    if card.get("where", "space") == "node":
+    if _on_node(card) or only:
         return await deploy_node(api, out, creds, root, made, node=node, force=force,
                                  channel=channel, only=only)  # fmt: skip
-    if only:
-        raise CliError("INVALID_PARAMS", ONLY_SPACE)
     # Always said before anything is sent, not only with --dry-run (v3 T2).
     for line in file_lines(made, every=False):
         out.note(line)
+    on_node = _node_line(root, made)
+    if on_node:
+        out.note(on_node[1])
     state_made = not (root / ".amsyos").exists()
 
     service_id = f"{await tenant_of(api)}.{card['service']}"
@@ -740,6 +830,9 @@ async def deploy(
         out.emit(answer, f"{service_id}@{current}: nothing changed (--force builds again)", *said)
         return 0
     version = next_version(str(card["version"]), current)
+    wrong = await checked_problems(api, [{"dir": ".", "card": card, "examples": root}], None)
+    if wrong:  # before anything is uploaded or rented
+        raise CliError("INVALID_CARD", "; ".join(wrong), {"problems": wrong})
     ok, said = await space_ready(api, hours, gpu_for(card, gpu))
     if not ok:  # before anything is uploaded
         raise CliError("FORBIDDEN", said.removeprefix("rented node: "))
@@ -1070,11 +1163,16 @@ then steps 2-3 for each card, with its own name, version, inputs, outputs and te
 command runs in the image's folder too (job.service tells them apart).
 --only services/a,. deploys only those ('.' is the top card); deploy in a card's own
 folder deploys that card from the top one.
+A top card of where: space deploys on the rented node; --only <its own-node cards> builds
+those on the own node from its folder and build keys. No card at the top, cards side by
+side below it on one image (services/*/amsyos.yaml): the top folder is the image's, the
+cards agree on its runtime, system, packages, models and setup; --image <name> picks one
+image when they name several.
+No build when only cards changed since the node's image was built from these files: a
+card deployed there with the same command is defined again ("define only"), another gets
+node.deploy from that image; --force builds anyway (say, the image's folder was removed).
+AMSYOS's service.check (free) checks every card before anything is uploaded or built.
 """
-ONLY_SPACE = (
-    "--only picks cards that share one image on an own node (where: node); a card of a "
-    "rented node deploys from its own folder: leave --only out"
-)
 # The conda-forge packages of each runtime, pinned as a rented node pins them.
 NODE_RUNTIMES: dict[str, tuple[str, ...]] = {
     "python": ("python=3.11", "pip"),
@@ -1233,31 +1331,53 @@ def node_line(node: dict[str, Any]) -> str:
 
 
 def node_problems(
-    node: dict[str, Any], you: dict[str, Any] | None, card: dict[str, Any] | None
+    node: dict[str, Any],
+    you: dict[str, Any] | None,
+    card: dict[str, Any] | None,
+    need: str = "build",
 ) -> list[str]:
     """What keeps deploy from building on this node, each with what fixes it: online, a
-    Linux machine at `full` (node.exec), an admin calling, a GPU when the card needs one."""
+    Linux machine at `full` (node.exec), an admin calling, a GPU when the card needs one.
+    `need`: build; as_node (node.deploy as the node's own account: full, an admin); deploy
+    (node.deploy: managed); define (service.define only)."""
     name = f"node {node.get('node')} '{node.get('name') or '?'}'"
     machine = obj(node.get("machine"))
     found: list[str] = []
     if node.get("state") != "online":
         seen = f" (last seen {node['last_seen']})" if node.get("last_seen") else ""
         found.append(f"{name} is offline{seen}: start it at that machine (amsyos-node run)")
-    if str(machine.get("os") or "") == "windows":
+    if need == "build" and str(machine.get("os") or "") == "windows":
         found.append(
             f"{name} runs Windows: deploy builds on a Linux node only; on Windows, zip the "
             "service yourself and node.deploy it (amsyos describe node.deploy)"
         )
-    if node.get("access") != "full":
+    level = node.get("access")
+    what = (
+        "builds there with node.exec"
+        if need == "build"
+        else "deploys there as the node's own account (its image's folder is closed to amsyos-job)"
+    )
+    if need in {"build", "as_node"} and level != "full":
         found.append(
-            f"{name} is at the level '{node.get('access') or '?'}': deploy builds there with "
-            "node.exec, which needs 'full'. Only the person at that machine raises it, there: "
-            "sudo amsyos-node access full"
+            f"{name} is at the level '{level or '?'}': deploy {what}, which needs 'full'. Only "
+            "the person at that machine raises it, there: sudo amsyos-node access full"
         )
-    if you is not None and you.get("kind") == "person" and not you.get("admin"):
+    elif need == "deploy" and level not in {"managed", "full"}:
         found.append(
-            f"node.exec, which builds there, is for an admin of your organisation (or an agent "
-            f"of one); you ({you.get('id')}) are no admin: an admin runs amsyos deploy"
+            f"{name} is at the level '{level or '?'}': deploy puts each service there with "
+            "node.deploy, which needs 'managed' or 'full'. Only the person at that machine "
+            "raises it, there: sudo amsyos-node access managed"
+        )
+    admin = you is None or you.get("kind") != "person" or you.get("admin")
+    if need in {"build", "as_node"} and not admin:
+        found.append(
+            (
+                "node.exec, which builds there,"
+                if need == "build"
+                else "node.deploy as the node's own account"
+            )
+            + f" is for an admin of your organisation (or an agent of one); you "
+            f"({obj(you).get('id')}) are no admin: an admin runs amsyos deploy"
         )
     needs = str(obj((card or {}).get("resources")).get("gpu") or "none")
     if needs == "required" and not seq(machine.get("gpus")):
@@ -1343,6 +1463,8 @@ def node_plan_lines(build: dict[str, Any], models_gb: float | None) -> list[str]
 # 2026-11-24: five cards of one image, their code in the top card's folder).
 BUILD_KEYS = ("runtime", "system", "packages", "models", "setup")
 MOST_UP = 8  # folders above a card looked at for the card whose image it shares
+# What deploy does for a card on an own node (`plan_cards`), as its answer and --dry-run say.
+BUILD, DEPLOY, DEFINE, UNCHANGED = "build", "deploy", "define only", "unchanged"
 
 
 def _named_image(card: dict[str, Any]) -> str | None:
@@ -1356,9 +1478,29 @@ def _on_node(card: dict[str, Any]) -> bool:
     return card.get("where", "space") == "node"
 
 
+def _cards_below(
+    root: Path, files: list[str]
+) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    """Each card among these files below `root`, (its folder, the card), and a note for each
+    one that cannot be read."""
+    found: list[tuple[str, dict[str, Any]]] = []
+    notes: list[str] = []
+    for rel in files:
+        if not rel.endswith(f"/{cards.CARD}"):
+            continue
+        folder = rel.removesuffix(f"/{cards.CARD}")
+        try:
+            found.append((folder, cards.load(root / folder)))
+        except CliError as exc:
+            notes.append(f"{rel} not read ({exc.code}): left out")
+    return found, notes
+
+
 def image_top(root: Path) -> Path | None:
-    """The folder of the card above this one whose image it shares (both `where: node`):
-    the code is there, and this folder may hold only its card. None when there is none."""
+    """The folder whose code a card of an own node (`where: node`) shares: the folder above
+    with a card that names the same image, whatever its `where`; else the repository's top
+    when it has no card and two cards or more below it name the image with `where: node`,
+    this one too (cards side by side). None when there is none."""
     try:
         card = cards.load(root)
     except CliError:
@@ -1377,24 +1519,149 @@ def image_top(root: Path) -> Path | None:
             up = cards.load(folder)
         except CliError:
             continue
-        if _on_node(up) and _named_image(up) == image:
+        if _named_image(up) == image:
             return folder
-    return None
+    if top is None or top == root.resolve() or (top / cards.CARD).is_file():
+        return None
+    beside, _ = _cards_below(top, files_of(top))
+    sharing = [f for f, c in beside if _on_node(c) and _named_image(c) == image]
+    here = root.resolve().relative_to(top).as_posix()
+    return top if here in sharing and len(sharing) >= 2 else None
 
 
 def from_top(out: Out, root: Path, only: list[str] | None) -> tuple[Path, list[str] | None]:
-    """A card below the card whose image it shares is deployed from that card's folder,
-    which holds the code: this card alone, unless `--only` names others."""
+    """A card below the folder whose code it shares is deployed from that folder: this card
+    alone, unless `--only` names others."""
     top = image_top(root)
     if top is None:
         return root, only
     sub = root.relative_to(top).as_posix()
+    whose = (
+        f"the {cards.CARD} of {top}, whose folder holds the code"
+        if (top / cards.CARD).is_file()
+        else f"the cards beside it below {top}, which holds the code (no {cards.CARD} there)"
+    )
     out.note(
-        f"{sub}/{cards.CARD} shares its image with the {cards.CARD} of {top}, whose folder holds "
-        "the code: deploying from there, "
+        f"{sub}/{cards.CARD} shares its image with {whose}: deploying from there, "
         + (f"--only {','.join(only)}" if only else f"this card alone (--only {sub})")
     )
     return top, only or [sub]
+
+
+def plan_at(root: Path, image: str | None, only: list[str] | None) -> dict[str, Any]:
+    """`plan` of the card here; with none here, of the cards side by side below it that
+    share one image on an own node (`shared_top`)."""
+    if (root / cards.CARD).is_file():
+        made = plan(root)
+        named = _named_image(made["card"])
+        if image and image != named:
+            raise CliError(
+                "INVALID_PARAMS",
+                f"--image: the {cards.CARD} here names the image {named}; --image chooses among "
+                f"cards side by side below a folder with no {cards.CARD}: leave it out",
+            )
+        return made
+    shared, notes = shared_top(root, image, only)
+    made = plan(root, shared)
+    made |= {"shared": True, "notes": notes}
+    return made
+
+
+def shared_top(
+    root: Path, image: str | None, only: list[str] | None
+) -> tuple[dict[str, Any], list[str]]:
+    """Cards side by side, none in `root` (a customer, 2026-11-25: services/*/amsyos.yaml on
+    one image with where: node, the code at the top): `root` is the image's folder, and the
+    card that stands for it holds what makes the image, on which the cards agree. The image:
+    `--image`, the one `--only`'s cards name, or the only one. The notes: cards left out."""
+    found, notes = _cards_below(root, files_of(root))
+    if not found:
+        raise CliError("NO_CARD", f"no {cards.CARD} in {root} nor below it: amsyos init writes one")
+    images: dict[str, list[str]] = {}
+    for folder, card in found:
+        named = _named_image(card)
+        if named is not None and _on_node(card):
+            images.setdefault(named, []).append(folder)
+    listed = "; ".join(f"{n}: {', '.join(d[:6])}" for n, d in sorted(images.items()))
+    asked = {_folder_of(p) for given in only or [] for p in given.split(",") if p.strip()}
+    of_asked = sorted(n for n, d in images.items() if asked & set(d))
+    if image and image not in images:
+        raise CliError(
+            "INVALID_PARAMS",
+            f"--image: no card below {root} names the image {image} with where: node; "
+            + (f"theirs: {listed}" if images else "none says where: node"),
+            {"images": images},
+        )
+    if not image and len(of_asked) > 1:
+        raise CliError(
+            "INVALID_PARAMS",
+            f"--only: its cards name {len(of_asked)} images ({', '.join(of_asked)}); one deploy "
+            f"builds one: name the cards of one image ({listed})",
+            {"images": images},
+        )
+    chosen = image or (of_asked[0] if of_asked else None)
+    if chosen is None and len(images) == 1:
+        chosen = next(iter(images))
+    if chosen is None:
+        if not images:
+            raise CliError(
+                "INVALID_CARD",
+                f"no {cards.CARD} in {root}, and no card below it says where: node: a rented "
+                "node's card deploys from its own folder (amsyos deploy --dir <its folder>)",
+            )
+        raise CliError(
+            "INVALID_PARAMS",
+            f"no {cards.CARD} in {root}, and the cards below it name {len(images)} images on an "
+            f"own node: {listed}; choose one with --image <name> (or --only <folders>)",
+            {"images": images},
+        )
+    for named, dirs in sorted(images.items()):
+        if named != chosen:
+            notes.append(f"{', '.join(dirs[:6])}: the image {named}: left out (--image {named})")
+    for folder, card in found:
+        named = _named_image(card)
+        if named is None:
+            notes.append(f"{folder}: names no service: left out")
+        elif named != chosen and not _on_node(card):
+            notes.append(
+                f"{folder}: where: {card.get('where', 'space')}: left out (a rented node's card "
+                "deploys from its own folder)"
+            )
+    mine = [(f, c) for f, c in found if f in images[chosen]]
+    agreed: dict[str, Any] = {}
+    differ: list[str] = []
+    for key in BUILD_KEYS:
+        said = {f: _build_value(key, c.get(key)) for f, c in mine if key in c or key == "runtime"}
+        if len({json.dumps(v, sort_keys=True) for v in said.values()}) > 1:
+            differ.append(
+                f"{key}: " + ", ".join(f"{f} {short(json.dumps(v), 80)}" for f, v in said.items())
+            )
+        elif said:
+            agreed[key] = next(iter(said.values()))
+    if differ:
+        raise CliError(
+            "INVALID_CARD",
+            f"the cards of the image {chosen} differ on what makes it, built once for them all: "
+            + "; ".join(differ)
+            + ": give each the same, or say it in one card only",
+            {"fields": [d.split(":", 1)[0] for d in differ]},
+        )
+    named_files = set[str]().union(*(cards.named_files(c) for _, c in mine))
+    return {"image": chosen, "where": "node", **agreed, "include": sorted(named_files)}, notes
+
+
+def _node_line(root: Path, made: dict[str, Any]) -> tuple[list[str], str] | None:
+    """A rented node's top card: the cards packed below it that name its image with
+    `where: node`, and the line that says how they are deployed (apart, with `--only`)."""
+    image = _named_image(made["card"])
+    found, _ = _cards_below(root, [str(r["file"]) for r in made["files"]])
+    dirs = [f for f, c in found if _on_node(c) and _named_image(c) == image]
+    if not dirs:
+        return None
+    return dirs, (
+        f"not deployed now: {', '.join(dirs[:8])} name the image {image} with where: node; "
+        f"amsyos deploy --only {','.join(dirs)} builds them on your own node from this folder"
+    )
 
 
 def _folder_of(given: str) -> str:
@@ -1429,24 +1696,23 @@ def _at(entry: dict[str, Any]) -> str:
 def node_cards(
     root: Path, made: dict[str, Any], only: list[str] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
-    """The cards one build on an own node serves: the top card (folder '.') and each card
-    packed below it that names the same image with `where: node`; those `--only` names; the
-    notes (cards of the image left out, keys of the image a card below sets); and every
-    problem of the cards chosen, by card, as `plan` finds them for the top one."""
+    """The cards one build on an own node serves: the top card (folder '.') when it says
+    `where: node`, and each card packed below it that names the same image with `where:
+    node`; those `--only` names; the notes (cards of the image left out, keys of the image a
+    card below sets); and every problem of the cards chosen, by card, as `plan` finds them
+    for the top one. The group's first entry is the top card's, whatever its `where` (a
+    rented node's, or one that stands for cards side by side): `on_node` says whether it is
+    one of them."""
     top: dict[str, Any] = made["card"]
     image = cards.image_of(top)
-    group: list[dict[str, Any]] = [{"dir": ".", "root": root, "card": top}]
-    notes: list[str] = []
-    for row in made["files"]:
-        rel = str(row["file"])
-        if not rel.endswith(f"/{cards.CARD}"):
-            continue
-        folder = rel.removesuffix(f"/{cards.CARD}")
-        try:
-            card = cards.load(root / folder)
-        except CliError as exc:
-            notes.append(f"{rel} not read ({exc.code}): left out")
-            continue
+    shared = bool(made.get("shared"))
+    group: list[dict[str, Any]] = [
+        {"dir": ".", "root": root, "card": top, "on_node": _on_node(top) and not shared}
+    ]
+    notes: list[str] = [str(n) for n in seq(made.get("notes"))]
+    found, unread = _cards_below(root, [str(r["file"]) for r in made["files"]])
+    notes += unread
+    for folder, card in found:
         if _named_image(card) != image:
             continue
         if not _on_node(card):
@@ -1455,19 +1721,34 @@ def node_cards(
                 "left out (where: node takes it)"
             )
             continue
-        group.append({"dir": folder, "root": root / folder, "card": card})
+        group.append({"dir": folder, "root": root / folder, "card": card, "on_node": True})
     problems: list[str] = []
-    chosen = group
+    chosen = [e for e in group if e["on_node"]]
     if only:
         asked = [_folder_of(p) for given in only for p in given.split(",") if p.strip()]
-        known = [str(e["dir"]) for e in group]
+        if "." in asked and not group[0]["on_node"]:
+            problems.append(
+                f"--only: '.' has no {cards.CARD}"
+                if shared
+                else f"--only: '.' is the top card, where: {top.get('where', 'space')}: amsyos "
+                "deploy without --only deploys it on the rented node"
+            )
+            asked = [a for a in asked if a != "."]
+        known = [str(e["dir"]) for e in chosen]
         unknown = [a for a in asked if a not in known]
         if unknown:
-            problems.append(
-                f"--only: no card of the image {image} at {', '.join(unknown)}; its cards: "
-                f"{', '.join(known)} ('.' is the top one)"
+            theirs = (
+                f"its cards: {', '.join(known)}" + (" ('.' is the top one)" if "." in known else "")
+                if known
+                else "no card below names it"
             )
-        chosen = [e for e in group if e["dir"] in asked]
+            problems.append(
+                f"--only: no card of the image {image} with where: node at "
+                f"{', '.join(unknown)}; {theirs}"
+            )
+        chosen = [e for e in chosen if e["dir"] in asked]
+    if not chosen and not problems:
+        problems.append(f"no card of the image {image} says where: node")
     names: dict[str, str] = {}
     for entry in chosen:
         card = entry["card"]
@@ -1511,7 +1792,7 @@ async def node_versions(
         if not cards.VERSION_RE.fullmatch(asked) or not cards.NAME_RE.fullmatch(
             str(card.get("service"))
         ):
-            continue  # the card's problem, said already
+            continue  # the card's problem, said already (none at all: cards side by side)
         entry["version"] = cards.full_version(asked)
         if api is None or tenant is None:  # not logged in: the version is not known
             entry["service"] = card["service"]
@@ -1526,19 +1807,113 @@ async def node_versions(
     return problems
 
 
-def image_version(top: dict[str, Any], chosen: list[dict[str, Any]], fingerprint: str) -> str:
+def image_version(top: dict[str, Any], chosen: list[dict[str, Any]], made: dict[str, Any]) -> str:
     """The version the image's folder on the node is named by: the top card's new one; when
     `--only` leaves it out, that with the files' fingerprint, so that no folder a service
-    of another version runs from is replaced."""
+    of another version runs from is replaced; with no top card (cards side by side), the
+    print of the code it holds (`code_print`)."""
+    if made.get("shared"):
+        return str(made["code"])[:12]
     version = str(top.get("version") or cards.full_version(str(top["card"]["version"])))
-    return version if top in chosen else f"{version}-{fingerprint[:8]}"
+    return version if top in chosen else f"{version}-{str(made['fingerprint'])[:8]}"
+
+
+def _image_version_of(image_dir: str) -> str:
+    """The version part of an image's folder on the node (images/<image>@<version>)."""
+    return Path(image_dir).name.partition("@")[2] or "0"
+
+
+def code_print(root: Path, made: dict[str, Any]) -> str:
+    """What an own node's image is built from: every file packed but the cards (a card that
+    changed alone needs no build), the kit deploy adds (`_node/`), the image's name and what
+    makes it (the top card's BUILD_KEYS)."""
+    digest = hashlib.sha256()
+    for row in made["files"]:
+        rel = str(row["file"])
+        if Path(rel).name == cards.CARD:
+            continue
+        path = root / rel
+        runs = "x" if path.stat().st_mode & 0o111 else "-"
+        digest.update(f"{rel}\0{runs}\0".encode())
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    for name in ("build.py", "run.sh", "fetch.py"):
+        digest.update((NODE_KIT / name).read_bytes())
+    top: dict[str, Any] = made["card"]
+    keys = {k: _build_value(k, top.get(k)) for k in BUILD_KEYS}
+    digest.update(json.dumps([cards.image_of(top), keys], sort_keys=True).encode())
+    return digest.hexdigest()
+
+
+def card_print(entry: dict[str, Any]) -> str:
+    """What a card says, with its example's files: another print, another version."""
+    card: dict[str, Any] = entry["card"]
+    files: dict[str, str | None] = {}
+    for name, path in cards.local_files(card.get("example")).items():
+        local = Path(entry.get("examples") or entry["root"]) / path
+        files[name] = sha256_of(local) if local.is_file() else None
+    return hashlib.sha256(
+        json.dumps([card, files], sort_keys=True, default=str).encode()
+    ).hexdigest()
+
+
+def plan_cards(
+    last: dict[str, Any],
+    made: dict[str, Any],
+    node_id: str | None,
+    chosen: list[dict[str, Any]],
+    *,
+    force: bool,
+) -> bool:
+    """Each chosen card's `plan` on this node, from what the last deploys here put there
+    (node.json; a customer, 2026-11-25: two services defined again several times a night
+    with new defaults in their cards, each a build to them). When the node's image was built
+    from these very files (`code_print`): `unchanged` (deployed and defined there from this
+    card, its newest version), `define only` (deployed there with this command and serve:
+    service.define alone), `deploy` (node.deploy from that image, then define); else every
+    card `build`. Returns whether a build is needed."""
+    image_dir = last.get("image_dir")
+    same_code = (
+        not force
+        and node_id is not None
+        and last.get("node") == node_id
+        and last.get("code") == made["code"]
+        and isinstance(image_dir, str)
+        and bool(image_dir)
+    )
+    before = obj(last.get("cards")) if last.get("node") == node_id else {}
+    for entry in chosen:
+        entry["print"] = card_print(entry)
+        if not same_code:
+            entry["plan"] = BUILD
+            continue
+        was = obj(before.get(entry["dir"]))
+        try:
+            commands: dict[str, str] | None = node_commands(entry["card"], str(image_dir))
+        except CliError:
+            commands = None  # too long: said by the commands' own check
+        deployed = (
+            commands is not None
+            and was.get("service") == entry.get("service")
+            and obj(was.get("commands")) == commands
+        )
+        if not deployed:
+            entry["plan"] = DEPLOY
+        elif (
+            was.get("card") == entry["print"]
+            and entry.get("current") is not None
+            and was.get("version") == entry["current"]
+        ):
+            entry["plan"] = UNCHANGED
+        else:
+            entry["plan"] = DEFINE
+    return not same_code
 
 
 def _same_as_last(
     last: dict[str, Any], made: dict[str, Any], node_id: str | None, chosen: list[dict[str, Any]]
 ) -> bool:
-    """Whether the last deploy here defined every chosen card's newest version from these
-    very files on this node."""
+    """CLI 0.5.4's state (no `code`): whether the last deploy here defined every chosen
+    card's newest version from these very files on this node."""
     if last.get("fingerprint") != made["fingerprint"] or last.get("node") != node_id:
         return False
     before = obj(last.get("cards")) or (
@@ -1568,6 +1943,39 @@ def _gpu_card(top: dict[str, Any], chosen: list[dict[str, Any]]) -> dict[str, An
     return top["card"]
 
 
+def _need(build_now: bool, todo: list[dict[str, Any]], last: dict[str, Any]) -> str:
+    """What node_problems weighs: a build; a node.deploy from the image already there (as the
+    node's own account when its folder is closed to amsyos-job); or service.define alone."""
+    if build_now:
+        return "build"
+    if any(e["plan"] == DEPLOY for e in todo):
+        return "as_node" if last.get("closed_at") else "deploy"
+    return "define"
+
+
+def _commands_said(commands: dict[str, str]) -> str:
+    return f"command: {commands.get('command') or '(none)'}" + (
+        f"; serve: {commands['serve']}" if commands.get("serve") else ""
+    )
+
+
+def _plan_line(entry: dict[str, Any], known: bool) -> str:
+    """A card's line in --dry-run: its version and what deploy does for it."""
+    if entry["plan"] == UNCHANGED:
+        return f"  {entry['dir']}: {entry['service']}@{entry.get('current')}: nothing changed"
+    newest = f"newest now: {entry['current']}" if entry.get("current") else "none defined yet"
+    head = f"  {entry['dir']}: {entry['service']}@{entry['version']}" + (
+        f" ({newest})" if known else ""
+    )
+    if entry["plan"] == DEFINE:
+        return f"{head}: define only (no build, no node.deploy: it runs there with this command)"
+    if entry["plan"] == DEPLOY:
+        return (
+            f"{head}: node.deploy from the image, then define; {_commands_said(entry['commands'])}"
+        )
+    return f"{head}, {_commands_said(entry['commands'])}"
+
+
 async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
     api: Api | None,
     out: Out,
@@ -1576,68 +1984,95 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
     channel: str,
     node: str | None,
     only: list[str] | None = None,
+    *,
+    force: bool = False,
 ) -> int:
     """`--dry-run` of `where: node`: the files, the node, the build and the calls for every
-    card of the image, with nothing sent (read-only calls when logged in). An own node
-    costs nothing."""
+    card of the image, with nothing sent (read-only calls when logged in, and AMSYOS's
+    service.check of each card, which defines nothing). An own node costs nothing."""
     card: dict[str, Any] = made["card"]
     group, chosen, notes, problems = node_cards(root, made, only)
     top = group[0]
     multi = len(chosen) > 1 or top not in chosen
+    made["code"] = code_print(root, made)
     examples = sorted(
         (e["examples"] / p).relative_to(root).as_posix()
         for e in chosen
         for p in cards.local_files(e["card"].get("example")).values()
     )
     answer: dict[str, Any] = {
-        "dry_run": True, "where": "node", "service": card["service"], "files": made["files"],
+        "dry_run": True, "where": "node", "service": card.get("service"), "files": made["files"],
         "left_out": made["left_out"], "fingerprint": made["fingerprint"], "channel": channel,
         "example_files": examples, "cost": 0,
     }  # fmt: skip
     chosen_node: dict[str, Any] | None = None
-    ready: list[str] = []
+    you: dict[str, Any] | None = None
     tenant: str | None = None
     if api is not None:
         tenant, you = await who_calls(api)
         chosen_node = await own_node(api, node)
-        ready = node_problems(chosen_node, you, _gpu_card(top, chosen))
     problems += await node_versions(api, tenant, top, chosen)
-    version = image_version(top, chosen, made["fingerprint"])
+    node_id = str(chosen_node.get("node")) if chosen_node is not None else None
+    last = _read_node_state(root) if api is not None else {}
+    build_now = plan_cards(last, made, node_id, chosen, force=force)
+    if (
+        api is not None
+        and not force
+        and "code" not in last
+        and _same_as_last(last, made, node_id, chosen)
+    ):
+        for e in chosen:
+            e["plan"] = UNCHANGED
+    todo = [e for e in chosen if e["plan"] != UNCHANGED]
+    ready: list[str] = []
+    if chosen_node is not None and todo:
+        need = _need(build_now, todo, last)
+        ready = node_problems(chosen_node, you, _gpu_card(top, todo), need)
+    image_dir = "" if build_now else str(last.get("image_dir") or "")
+    version = image_version(top, chosen, made) if build_now else _image_version_of(image_dir)
     gpu = bool(seq(obj((chosen_node or {}).get("machine")).get("gpus")))
     build = node_build(root, made, version, gpu)
     package = node_package(root, made, build)
     long_dir = f"/home/{'x' * 24}/amsyos-build/images/{build['image']}@{version}"
-    for entry in chosen:
-        try:
-            node_commands(entry["card"], long_dir)
-        except CliError as exc:
-            problems.append(_at(entry) + exc.hint)
+    for entry in todo:
+        if entry["plan"] in {BUILD, DEPLOY}:
+            try:
+                node_commands(entry["card"], long_dir if build_now else image_dir)
+            except CliError as exc:
+                problems.append(_at(entry) + exc.hint)
+    if api is not None and todo:
+        problems += await checked_problems(api, todo, "node")
     if problems:
         raise CliError(_problem_code(problems), "; ".join(problems), {"problems": problems})
+    there = f"<the folder of {build['image']}@{version}>" if build_now else image_dir
     for entry in chosen:  # the image's folder is the node's to say
         entry["commands"] = {
-            k: v.replace("IMAGE_DIR", f"<the folder of {build['image']}@{version}>")
+            k: v.replace("IMAGE_DIR", there)
             for k, v in node_commands(entry["card"], "IMAGE_DIR").items()
         }
-    node_id = str(chosen_node.get("node")) if chosen_node is not None else None
-    same = api is not None and _same_as_last(_read_state(root), made, node_id, chosen)
-    first = chosen[0]
+    first = todo[0] if todo else chosen[0]
     answer["service"] = first.get("service", answer["service"])
     if chosen_node is not None:
         answer |= {"node": node_id, "node_ready": not ready}
         if ready:
             answer["problems"] = ready
-    answer["would_make"] = None if same else first.get("version")
+    answer["would_make"] = first.get("version") if todo else None
     answer["image"] = f"{build['image']}@{version}"
+    if not build_now and image_dir:
+        answer["image_dir"] = image_dir
     answer["cards"] = [
         {"dir": e["dir"], "service": e.get("service"), "newest": e.get("current"),
-         "would_make": None if same else e.get("version"), "commands": e["commands"]}
+         "would_make": None if e["plan"] == UNCHANGED else e.get("version"), "plan": e["plan"],
+         "commands": e["commands"]}
         for e in chosen
     ]  # fmt: skip
-    rows = await model_sizes(build["models"]) if build["models"] else []
+    rows = await model_sizes(build["models"]) if build["models"] and build_now else []
     known = [r["bytes"] for r in rows if r["bytes"] is not None]
     models_gb = sum(known) / 1e9 if rows and len(known) == len(rows) else None
-    answer |= {"build": build, "package_bytes": len(package), "commands": first["commands"]}
+    answer |= {
+        "build": build if build_now else None, "package_bytes": len(package),
+        "commands": first["commands"],
+    }  # fmt: skip
     if notes:
         answer["notes"] = notes
     lines = file_lines({**made, "archive": package}, every=True)
@@ -1647,13 +2082,20 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
     if chosen_node is not None:
         lines.append(f"own node: {node_line(chosen_node)}")
         lines += [f"  not ready: {p}" for p in ready]
-    if same:
+    n_cards = sum(1 for e in group if e["on_node"])
+    if not todo:
         lines += [f"{e['service']}@{e['current']}: nothing changed, nothing would be built"
                   for e in chosen]  # fmt: skip
     elif chosen_node is None:
         lines.append(
             f"would deploy {', '.join(str(e['service']) for e in chosen)} on your own node (not "
             "logged in: the node and the versions are not known):"
+        )
+    elif not build_now:
+        lines.append(
+            f"would deploy {len(todo)} of the {n_cards} cards of the image {build['image']} on "
+            f"it with no build: the code is as built in {image_dir} (--force builds), channel "
+            f"{channel}:"
         )
     elif not multi:
         newest = f"newest now: {first['current']}" if first.get("current") else "none defined yet"
@@ -1663,37 +2105,41 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
         )
     else:
         lines.append(
-            f"would deploy {len(chosen)} of the {len(group)} cards of the image "
-            f"{build['image']} on it, one build ({build['image']}@{version}), channel {channel}:"
+            f"would deploy {len(todo)} of the {n_cards} cards of the image {build['image']} on "
+            f"it, one build ({build['image']}@{version}), channel {channel}:"
         )
-    if multi and not same:
-        for e in chosen:
-            newest = f"newest now: {e['current']}" if e.get("current") else "none defined yet"
-            lines.append(
-                f"  {e['dir']}: {e['service']}@{e['version']}"
-                + (f" ({newest})" if chosen_node is not None else "")
-                + f", command: {e['commands'].get('command') or '(none)'}"
-                + (f"; serve: {e['commands']['serve']}" if e["commands"].get("serve") else "")
-            )
-    steps = [
-        f"  1. node.exec (an admin; the node at full), with the package as file1: {NODE_EXEC}; "
-        f"up to {NODE_EXEC_S // 60} min",
-        *node_plan_lines(build, models_gb),
-    ]
-    if multi:
-        steps += [
-            "  2. for each card: node.deploy the package with its command (above)",
-            "  3. for each card: service.define its version with compute: node; its check runs "
-            "its example on the node",
+    if todo and (multi or not build_now):
+        lines += [_plan_line(e, chosen_node is not None) for e in chosen]
+    if build_now:
+        steps = [
+            f"  1. node.exec (an admin; the node at full), with the package as file1: {NODE_EXEC}; "
+            f"up to {NODE_EXEC_S // 60} min",
+            *node_plan_lines(build, models_gb),
         ]
+        if multi:
+            steps += [
+                "  2. for each card: node.deploy the package with its command (above)",
+                "  3. for each card: service.define its version with compute: node; its check "
+                "runs its example on the node",
+            ]
+        else:
+            steps += [
+                f"  2. node.deploy the package, {_commands_said(first['commands'])}",
+                f"  3. service.define {first['card']['service']}@{first.get('version')} with "
+                "compute: node; its check runs the example on the node",
+            ]
     else:
-        steps += [
-            f"  2. node.deploy the package, command: {first['commands'].get('command') or '(none)'}"
-            + (f"; serve: {first['commands']['serve']}" if first["commands"].get("serve") else ""),
-            f"  3. service.define {card['service']}@{first.get('version')} with compute: node; "
-            "its check runs the example on the node",
-        ]
-    if not same:
+        deploying = [str(e["dir"]) for e in todo if e["plan"] == DEPLOY]
+        steps = (
+            [f"  1. node.deploy the package for {', '.join(deploying)} (above)"]
+            if deploying
+            else []
+        )
+        steps.append(
+            f"  {len(steps) + 1}. service.define {'each' if len(todo) > 1 else 'it'} with "
+            "compute: node; its check runs its example on the node"
+        )
+    if todo:
         lines += steps
     lines += ["cost: none (an own node is free)", "nothing was sent (--dry-run)"]
     out.emit(answer, *lines)
@@ -1714,16 +2160,24 @@ async def deploy_node(
 ) -> int:
     """`where: node`: build on the organisation's own node by node.exec, then for each card
     of the image node.deploy the package there and service.define it with `compute: node`;
-    each check runs there. One card's failure after the build is said with the others'."""
+    each check runs there. When the node's image was built from these files already, no
+    build: a card changed is defined again, or deployed from that image first (`plan_cards`).
+    One card's failure after the build is said with the others'."""
     group, chosen, notes, problems = node_cards(root, made, only)
     top = group[0]
     multi = len(chosen) > 1 or top not in chosen
+    made["code"] = code_print(root, made)
     tenant, you = await who_calls(api)
     chosen_node = await own_node(api, node)
     node_id = str(chosen_node.get("node"))
     problems += await node_versions(api, tenant, top, chosen)
-    last = _read_state(root)
-    if not force and not problems and _same_as_last(last, made, node_id, chosen):
+    last = _read_node_state(root)
+    build_now = plan_cards(last, made, node_id, chosen, force=force)
+    if not force and "code" not in last and _same_as_last(last, made, node_id, chosen):
+        for e in chosen:
+            e["plan"] = UNCHANGED
+    todo = [e for e in chosen if e["plan"] != UNCHANGED]
+    if not todo and not problems:
         said_cards: list[dict[str, Any]] = []
         lines: list[str] = []
         for e in chosen:
@@ -1738,77 +2192,101 @@ async def deploy_node(
             answer["cards"] = said_cards
         out.emit(answer, *lines)
         return 0
-    ready = node_problems(chosen_node, you, _gpu_card(top, chosen))
-    version = image_version(top, chosen, made["fingerprint"])
+    ready = node_problems(chosen_node, you, _gpu_card(top, todo), _need(build_now, todo, last))
+    image_dir = "" if build_now else str(last["image_dir"])
+    version = image_version(top, chosen, made) if build_now else _image_version_of(image_dir)
     gpu = bool(seq(obj(chosen_node.get("machine")).get("gpus")))
     build = node_build(root, made, version, gpu)
-    package = node_package(root, made, build)
+    deploying = [e for e in todo if e["plan"] in {BUILD, DEPLOY}]
+    package = node_package(root, made, build) if deploying else b""
     # A command too long for node.deploy is said before the build: the image's folder as a
     # long home folder would put it.
     long_dir = f"/home/{'x' * 24}/amsyos-build/images/{build['image']}@{version}"
-    for entry in chosen:
+    for entry in deploying:
         try:
-            node_commands(entry["card"], long_dir)
+            node_commands(entry["card"], long_dir if build_now else image_dir)
         except CliError as exc:
             problems.append(_at(entry) + exc.hint)
+    # AMSYOS's check of every card, before anything is uploaded or built (free).
+    problems += await checked_problems(api, todo, "node")
     if problems or ready:  # every one at once, before anything is uploaded
         raise CliError(
             _problem_code(problems), "; ".join(problems + ready),
             {"node": node_id, "problems": problems + ready},
         )  # fmt: skip
-    for line in file_lines({**made, "archive": package}, every=False):
-        out.note(line)
+    if deploying:
+        for line in file_lines({**made, "archive": package}, every=False):
+            out.note(line)
     for line in notes:
         out.note(line)
-    if multi:
+    image = f"{build['image']}@{version}"
+    n_cards = sum(1 for e in group if e["on_node"])
+    if not build_now:
         out.note(
-            f"image {build['image']}@{version}: {len(chosen)} of its {len(group)} cards: "
-            + ", ".join(str(e["dir"]) for e in chosen)
+            f"no build: the code is as built on node {node_id} in {image_dir} (--force builds); "
+            + ", ".join(f"{e['dir']}: {e['plan']}" for e in todo)
+        )
+    elif multi:
+        out.note(
+            f"image {image}: {len(todo)} of its {n_cards} cards: "
+            + ", ".join(str(e["dir"]) for e in todo)
         )
     state_made = not (root / ".amsyos").exists()
-    for e in chosen:
+    for e in todo:
         await upload_example(api, out, e["examples"], e["card"], f"{e['dir']}: " if multi else "")
     folder, _ = repo.state_dir(root)
     if state_made:
         out.note(repo.STATE_NOTE)
-    tmp = folder / f"{build['image']}-{version}.zip"
-    tmp.write_bytes(package)
-    try:
-        row = (await upload(api, [tmp]))[0]
-    finally:
-        tmp.unlink(missing_ok=True)
-    asset = str(row["asset"])
-    how = "already in the workspace" if row.get("reused") else "uploaded"
-    out.note(f"package: {asset} ({how})")
-    first = chosen[0]
+    asset = ""
+    if deploying:
+        tmp = folder / f"{build['image']}-{version}.zip"
+        tmp.write_bytes(package)
+        try:
+            row = (await upload(api, [tmp]))[0]
+        finally:
+            tmp.unlink(missing_ok=True)
+        asset = str(row["asset"])
+        how = "already in the workspace" if row.get("reused") else "uploaded"
+        out.note(f"package: {asset} ({how})")
+    first = todo[0]
     answer: dict[str, Any] = {
         "service": first["service"], "version": first["version"], "node": node_id,
-        "channel": channel, "image": f"{build['image']}@{version}", "files": made["files"],
-        "left_out": made["left_out"], "package": asset, "cost": 0,
+        "channel": channel, "image": image, "files": made["files"],
+        "left_out": made["left_out"], "cost": 0,
     }  # fmt: skip
+    if asset:
+        answer["package"] = asset
+    if not build_now:
+        answer |= {"build": None, "image_dir": image_dir}
     if notes:
         answer["notes"] = notes
     if state_made:
         answer["made"] = ".amsyos/"
     began = time.monotonic()
-    built, lines = await _node_exec(api, out, creds, node_id, asset, answer)
-    if built is None:
-        out.emit(answer, *lines)
-        return 1
-    closed = built.get("closed_at")
-    if closed:
-        out.note(
-            f"its jobs run as the node's own account: {closed} is closed to the job account "
-            "amsyos-job (a job of an order there would fail); open it (chmod o+x) or set "
-            "AMSYOS_BUILD_HOME for the node, then deploy again, to have them run as amsyos-job"
-        )
+    if build_now:
+        made_on_node, lines = await _node_exec(api, out, creds, node_id, asset, answer)
+        if made_on_node is None:
+            out.emit(answer, *lines)
+            return 1
+        built: dict[str, Any] = made_on_node
+        closed = built.get("closed_at")
+        if closed:
+            out.note(
+                f"its jobs run as the node's own account: {closed} is closed to the job account "
+                "amsyos-job (a job of an order there would fail); open it (chmod o+x) or set "
+                "AMSYOS_BUILD_HOME for the node, then deploy again, to have them run as amsyos-job"
+            )
+    else:
+        built = {"image_dir": image_dir, "closed_at": last.get("closed_at")}
     image_dir = str(built.get("image_dir"))
     source = api.source()
-    for e in chosen:
+    for e in todo:
         try:
-            commands = node_commands(e["card"], image_dir)
-            e["deployed"] = await _node_deploy(api, out, node_id, e["service"], asset, commands,
-                                               built)  # fmt: skip
+            if e["plan"] in {BUILD, DEPLOY}:
+                commands = node_commands(e["card"], image_dir)
+                e["deployed"] = await _node_deploy(api, out, node_id, e["service"], asset,
+                                                   commands, built)  # fmt: skip
+                e["commands"] = commands
             spec = cards.spec_of(e["card"])
             spec["compute"] = "node"
             params: dict[str, Any] = {
@@ -1819,13 +2297,18 @@ async def deploy_node(
                 params["source"] = json.dumps(source, separators=(",", ":"))
             e["defined"] = await api.instant("service.define", params)
         except CliError as exc:
-            if not multi:
-                raise
             e["error"] = exc.answer()
+            if not multi:
+                e["ok"] = False
+                _remember_cards(root, last, made, node_id, chosen, built if build_now else None)
+                raise
             out.note(f"{e['service']}@{e['version']}: not deployed: {exc.code}: {exc.hint}")
             continue
-        out.note(f"defined {e['service']}@{e['version']} (compute: node)")
-    for e in chosen:  # their checks run on the node meanwhile
+        out.note(
+            f"defined {e['service']}@{e['version']} (compute: node"
+            + ("; define only)" if e["plan"] == DEFINE else ")")
+        )
+    for e in todo:  # their checks run on the node meanwhile
         if "error" in e:
             continue
         e["check"] = await _check(api, out, e["service"], e["version"])
@@ -1834,35 +2317,41 @@ async def deploy_node(
             remember_check(root, check_job, f"{e['service']}@{e['version']}")
     took = round(time.monotonic() - began)
     on = f"on node {node_id} '{chosen_node.get('name') or '?'}'"
-    if multi:
-        lines = [
-            f"image {build['image']}@{version} {on}: build {answer['build_job']}, {took}s in all, "
-            f"cost none; {len(chosen)} cards:"
-        ]
+    if build_now:
+        how = f"build {answer['build_job']}"
+    elif not multi and first["plan"] == DEFINE:
+        how = "define only: no build, no node.deploy"
     else:
-        lines = [
-            f"{first['service']}@{first['version']}  {on} (build {answer['build_job']}, {took}s "
-            "in all, cost none)"
-        ]
+        how = f"no build: the image built before, {image_dir}"
+    if multi:
+        lines = [f"image {image} {on}: {how}, {took}s in all, cost none; {len(chosen)} cards:"]
+    else:
+        lines = [f"{first['service']}@{first['version']}  {on} ({how}, {took}s in all, cost none)"]
     too_old = False
     for e in chosen:
+        if e["plan"] == UNCHANGED:
+            lines.append(f"{e['service']}@{e['current']} ({e['dir']}): nothing changed")
+            continue
         if multi:
-            lines.append(f"{e['service']}@{e['version']} ({e['dir']})")
+            lines.append(
+                f"{e['service']}@{e['version']} ({e['dir']})"
+                + (f": {e['plan']}" if e["plan"] in {DEFINE, DEPLOY} else "")
+            )
         e["ok"], said, old = _card_lines(e, multi=multi)
         lines += said
         too_old = too_old or old
     if too_old:
         lines.append(f"  {NODE_UPDATE}")
     answer["cards"] = [
-        {k: e[k] for k in ("dir", "service", "version", "check", "run", "error") if k in e}
+        {k: e[k] for k in ("dir", "service", "version", "plan", "check", "run", "error") if k in e}
+        | ({"version": e.get("current")} if e["plan"] == UNCHANGED else {})
         for e in chosen
     ]
     if not multi:
         answer |= {k: first[k] for k in ("deployed", "defined", "check", "run") if k in first}
-    if any(e["ok"] for e in chosen):
-        _remember_cards(root, last, made, node_id, chosen)
+    _remember_cards(root, last, made, node_id, chosen, built if build_now else None)
     out.emit(answer, *lines)
-    return 0 if all(e["ok"] for e in chosen) else 1
+    return 0 if all(e["ok"] for e in todo) else 1
 
 
 def _card_lines(entry: dict[str, Any], *, multi: bool) -> tuple[bool, list[str], bool]:
@@ -1895,24 +2384,41 @@ def _card_lines(entry: dict[str, Any], *, multi: bool) -> tuple[bool, list[str],
     return True, lines + [pad + s for s in said], too_old
 
 
-def _remember_cards(
+def _remember_cards(  # noqa: PLR0917 - the deploy's state, passed on
     root: Path, last: dict[str, Any], made: dict[str, Any], node_id: str,
-    chosen: list[dict[str, Any]],
+    chosen: list[dict[str, Any]], built: dict[str, Any] | None,
 ) -> None:  # fmt: skip
-    """What `_same_as_last` reads: the cards defined from these files on this node, kept
-    with those an earlier deploy of the same files defined there (`--only`)."""
-    done = {
-        str(e["dir"]): {"service": e["service"], "version": e["version"]}
-        for e in chosen
-        if e.get("ok")
-    }
-    same = last.get("fingerprint") == made["fingerprint"] and last.get("node") == node_id
-    kept = {**(obj(last.get("cards")) if same else {}), **done}
+    """What `plan_cards` reads next time (node.json): the code the node's image was built
+    from (`built`: by this deploy) and its folder, and by card folder the service deployed
+    there with its commands, the version defined and the card's print. A card node.deploy
+    put there whose version did not pass keeps no print: it is defined again next time; one
+    whose node.deploy did not happen in a build is forgotten (deployed again)."""
+    same = last.get("node") == node_id and "code" in last
+    kept = {str(k): obj(v) for k, v in obj(last.get("cards")).items()} if same else {}
+    for e in chosen:
+        if e["plan"] == UNCHANGED:
+            continue
+        was = kept.get(str(e["dir"]), {})
+        if e.get("deployed"):
+            was = {"service": e["service"], "commands": e["commands"]}
+        elif e["plan"] != DEFINE:
+            was = {}  # what the node runs for it is not known
+        if was and e.get("ok"):
+            was = {**was, "version": e["version"], "card": e["print"]}
+        if was:
+            kept[str(e["dir"])] = was
+        else:
+            kept.pop(str(e["dir"]), None)
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    state: dict[str, Any] = {"fingerprint": made["fingerprint"], "at": at, "node": node_id}
-    if "." in kept:
-        state |= obj(kept["."])
-    _write_state(root, {**state, "cards": kept})
+    state: dict[str, Any] = {"node": node_id, "fingerprint": made["fingerprint"], "at": at}
+    if built is not None:
+        state |= {
+            "code": made["code"], "image_dir": built.get("image_dir"),
+            "closed_at": built.get("closed_at"),
+        }  # fmt: skip
+    elif same:
+        state |= {k: last.get(k) for k in ("code", "image_dir", "closed_at")}
+    _write_state(root, {**state, "cards": kept}, NODE_STATE)
 
 
 async def _node_exec(  # noqa: PLR0917 - the deploy's state, passed on

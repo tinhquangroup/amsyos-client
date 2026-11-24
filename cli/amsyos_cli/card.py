@@ -45,7 +45,7 @@ INPUT_KEYS = (
 SPEC_KEYS = ("tags", "schemas", "contract", "controls", "pilot", "estimate_per", "tests", "cache")
 # What a file of each format is, when the card does not say (services/core/types.yaml).
 MEANS_OF_FORMAT = {
-    **dict.fromkeys(("png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"), "image"),
+    **dict.fromkeys(("png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "svg"), "image"),
     **dict.fromkeys(("mp4", "mov", "webm", "mkv"), "video"),
     **dict.fromkeys(("wav", "mp3", "ogg", "flac", "m4a"), "audio"),
     **dict.fromkeys(("csv", "xlsx"), "sheet"),
@@ -63,7 +63,7 @@ OUTPUT_FORMATS = frozenset({
     "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "psd", "pdf", "mp4", "m4a", "mov",
     "webm", "mkv", "wav", "mp3", "ogg", "flac", "zip", "xlsx", "docx", "pptx", "odt", "glb",
     "parquet", "npy", "npz", "gz", "tgz", "tar", "json", "gltf", "geojson", "txt", "md", "csv",
-    "srt", "vtt", "html", "obj", "bvh", "cube", "3dl", "bin",
+    "srt", "vtt", "html", "obj", "bvh", "cube", "3dl", "bin", "svg",
 })  # fmt: skip
 # What a file input is, by the words of its name.
 MEANS_OF_WORD = (
@@ -133,6 +133,11 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               and deploys every card below it that names it with where: node, each with its
               own name, version, inputs and tests, its command run in the top card's folder
               (--only services/a,. picks some; job.service tells their jobs apart).
+              A top card of where: space deploys alone; --only <its own-node cards> builds
+              them on the own node. No top card: deploy in the folder above cards side by
+              side builds it there once (the cards agree on runtime, system, packages,
+              models and setup; --image picks one image). When only cards changed since
+              the node's build, deploy defines them again with no build.
   runtime     python | node | java | go | r. python is 3.11 with PyTorch.
   system      Programs from conda-forge, name or name=version: [ffmpeg, imagemagick=7.1.2].
               init proposes those the code runs (subprocess, os.system, shutil.which:

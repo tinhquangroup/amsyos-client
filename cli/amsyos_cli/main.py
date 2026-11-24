@@ -41,14 +41,13 @@ from amsyos_cli.common import (
     session_ending,
     short,
 )
-from amsyos_cli.deploy import DEPLOY_NODE_HELP, check_of, deploy, dry_run, tenant_of
+from amsyos_cli.deploy import DEPLOY_NODE_HELP, check_card, check_of, deploy, dry_run, tenant_of
 from amsyos_cli.feedback import add_parser as add_feedback
 from amsyos_cli.feedback import logout_line
 from amsyos_cli.files import (
     describe_saved,
     download,
     face_note,
-    held,
     human,
     kept_for,
     sha256_of,
@@ -1140,29 +1139,10 @@ def _mcp_tool(path: str) -> dict[str, Any]:
 async def _check_card(
     api: Api, card: dict[str, Any], answer: dict[str, Any], root: Path
 ) -> list[str]:
-    """`service.check` of the card; nothing is defined. An example's local file goes as the
-    workspace's own asset when it holds that content (`asset.has`, read-only), else as a
-    placeholder whose problem is left to deploy, which uploads the file first."""
-    service = cards.for_check(card)
-    local = cards.local_files(card.get("example"))
-    pending: dict[str, str] = {}
-    if local:
-        digests = {k: sha256_of(root / p) for k, p in local.items() if (root / p).is_file()}
-        have = await held(api, sorted(set(digests.values())))
-        example = obj(service["spec"].get("example"))
-        for name, path in local.items():
-            ref = have.get(digests.get(name, ""))
-            if ref:
-                example[name] = ref
-            else:
-                pending[name] = path
-    told = await api.instant("service.check", {"spec": json.dumps(service)})
+    """`service.check` of the card (deploy.check_card, which deploy runs too before it
+    uploads or builds); nothing is defined."""
+    told, pending = await check_card(api, card, root)
     problems = [str(p) for p in seq(told.get("problems"))]
-    if pending:
-        kept = [p for p in problems if cards.EXAMPLE_FILE not in p]
-        if len(kept) < len(problems):
-            told = {**told, "problems": kept, "ok": not kept, "left_to_deploy": pending}
-            problems = kept
     answer["check"] = told
     checked = f" ({told['service']})" if told.get("service") else ""
     lines = [f"service.check (AMSYOS): {'ok' if told.get('ok') else 'problems'}{checked}"]
@@ -1320,19 +1300,24 @@ async def cmd_deploy(args: argparse.Namespace, out: Out) -> int:
             creds = credentials()
             async with Api(creds, out) as api:
                 return await dry_run(
-                    api, out, root, args.channel, args.hours, node=args.node, only=only
-                )
+                    api, out, root, args.channel, args.hours, node=args.node, only=only,
+                    image=args.image, force=args.force,
+                )  # fmt: skip
         except CliError as exc:
             if exc.code.startswith("INVALID") or exc.code in {"NO_CARD", "CREDENTIALS_FILE"}:
                 raise
             out.debug(f"dry run without AMSYOS ({exc.code})")
-        return await dry_run(None, out, root, args.channel, node=args.node, only=only)
+        return await dry_run(
+            None, out, root, args.channel, node=args.node, only=only, image=args.image,
+            force=args.force,
+        )  # fmt: skip
     creds = credentials()
     async with Api(creds, out) as api:
         return await deploy(
             api, out, creds, root,
             hours=args.hours, idle_minutes=args.idle_minutes or None, close=args.close,
             gpu=args.gpu, force=args.force, channel=args.channel, node=args.node, only=only,
+            image=args.image,
         )  # fmt: skip
 
 
@@ -1920,10 +1905,18 @@ def parser() -> Parser:
     p.add_argument(
         "--only", metavar="DIR,…",
         help="where: node: deploy only these of the cards that share the image, by their folder "
-        "from the top card's ('.' is the top card); default every one",
+        "from the top card's ('.' is the top card); default every one. Under a top card of "
+        "where: space, its own-node cards, built on the own node from its folder",
+    )  # fmt: skip
+    p.add_argument(
+        "--image", metavar="NAME",
+        help="no card here, cards side by side below it on several images: the one to deploy",
     )  # fmt: skip
     p.add_argument("--close", action="store_true", help="give the rented node back after")
-    p.add_argument("--force", action="store_true", help="build even when nothing changed")
+    p.add_argument(
+        "--force", action="store_true",
+        help="build even when nothing changed (on an own node: also when only cards did)",
+    )  # fmt: skip
     p.add_argument(
         "--channel", choices=["dev", "stable"], default="dev",
         help="the channel the new version moves (default dev; stable needs service.promote)",

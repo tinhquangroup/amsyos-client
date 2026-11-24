@@ -977,6 +977,10 @@ async fn do_job(ctx: &Arc<Ctx>, job: &JobMsg, svc: &Service, cancel: watch::Rece
             o.size > 0
         });
     }
+    // Node 2.1.3: a service that ended well but left a declared output unmade: the kernel
+    // fails the job (unless the output is optional), so the end of its stderr goes with
+    // `succeeded`, beside the notes, to say why.
+    let unmade = !is_exec && job.outputs.iter().any(|n| !outs.iter().any(|o| &o.name == n));
     let most = job.limits.max_output_mb.saturating_mul(1 << 20);
     for o in &outs {
         let problem = if o.size == 0 {
@@ -1004,10 +1008,26 @@ async fn do_job(ctx: &Arc<Ctx>, job: &JobMsg, svc: &Service, cancel: watch::Rece
     let mut m = ctx.state(id, "succeeded");
     m.insert("outputs".into(), Value::Object(put));
     m.insert("took_s".into(), round1(started.elapsed().as_secs_f64()).into());
-    if !notes.is_empty() {
-        m.insert("said".into(), util::tail(&notes.join("\n"), 2000).into());
+    let said = said_with(&notes.join("\n"), if unmade { said.as_str() } else { "" });
+    if !said.is_empty() {
+        m.insert("said".into(), said.into());
     }
     with_exit(Value::Object(m))
+}
+
+/// A `succeeded` message's `said`: the node's notes, then the end of the service's stderr
+/// (2.1.3, when it left an output unmade); at most 2000 characters, the notes at most 600 of
+/// them when both are there.
+fn said_with(notes: &str, stderr: &str) -> String {
+    match (notes.is_empty(), stderr.is_empty()) {
+        (_, true) => util::tail(notes, 2000),
+        (true, false) => util::tail(stderr, 2000),
+        (false, false) => {
+            let head = util::tail(notes, 600);
+            let room = 2000 - head.chars().count() - 1;
+            format!("{head}\n{}", util::tail(stderr, room))
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------ actions

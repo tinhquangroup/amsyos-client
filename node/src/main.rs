@@ -31,7 +31,7 @@ use serde_json::Value;
 use config::{Access, Config, Service, Services};
 
 const USAGE: &str = "\
-AMSYOS Node 2.1.2: this computer runs its organisation's services. Nothing dials into it.
+AMSYOS Node 2.1.3: this computer runs its organisation's services. Nothing dials into it.
 
   amsyos-node setup [--user <name>] [--jobs <folder>] [--services <folder>]
         once, as an administrator (Windows) or root (Linux: sudo), and again after each new

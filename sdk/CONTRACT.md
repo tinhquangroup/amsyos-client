@@ -6,7 +6,7 @@ Every service an organisation adds says the same things the same way, whatever i
 
 A service is its manifest. A new service of an organisation, or a new version of one, of kind `hosted` (its own code) or `composed` (steps of other services), is refused unless:
 
-- **Every file is typed.** Every file input (`type: asset`) has `means`. Every output has a type in `means`. A type is one of the operator's (services/core/types.yaml) or one of the organisation's own (`t_<org>.<name>`, see §4), and it fits the output's format: an `image.*` output is png, jpg, webp, gif, tif or psd, a `video.*` mp4, mov, webm or mkv, and so on. `text` suits a log or a note, `report` a JSON report.
+- **Every file is typed.** Every file input (`type: asset`) has `means`. Every output has a type in `means`. A type is one of the operator's (services/core/types.yaml) or one of the organisation's own (`t_<org>.<name>`, see §4), and it fits the output's format: an `image.*` output is png, jpg, webp, gif, tif, psd or svg, a `video.*` mp4, mov, webm or mkv, and so on. `text` suits a log or a note, `report` a JSON report.
 - **It is said in English.** The summary (at most 120 characters, what it takes and what it makes) and every input's description.
 - **It gives an example** (`hosted` only). `example` holds the params of one call; files are `asset://` refs the organisation may read. The example is run once when the version is defined (§5).
 
@@ -73,7 +73,7 @@ Following the folder layout by hand is just as good.
 When a version of own code is defined, AMSYOS runs its `example` once, as the manager who defined it, in the same workspace, paid like any job. Then it checks that:
 - the job succeeded;
 - every declared output is there and not empty (an output marked `optional: true`, which only some calls make, may be missing);
-- each file's first bytes are its declared format (images: png, jpg, webp, gif, tif, psd; pdf; video and sound: mp4/mov/m4a, webm/mkv, wav, mp3, ogg, flac; archives and documents: zip, xlsx, docx, pptx, odt, gz/tgz, tar; glb, parquet), JSON (json, gltf, geojson) parses and text (txt, md, csv, srt, vtt, html, obj, bvh) is UTF-8; `kernel/conform.py` holds the list.
+- each file's first bytes are its declared format (images: png, jpg, webp, gif, tif, psd; pdf; video and sound: mp4/mov/m4a, webm/mkv, wav, mp3, ogg, flac; archives and documents: zip, xlsx, docx, pptx, odt, gz/tgz, tar; glb, parquet), JSON (json, gltf, geojson) parses, text (txt, md, csv, srt, vtt, html, obj, bvh) is UTF-8 and an svg is XML whose root is `<svg>` in SVG's namespace with a width and height or a viewBox (read as data: no entity, nothing fetched or run); `kernel/conform.py` holds the list.
 
 Until the check has passed, the organisation may run the version itself, but `mission.plan` does not join it and `offer.make` refuses it. `describe` shows `check: {state, job, at, problems}`. Building the same tag again checks again.
 

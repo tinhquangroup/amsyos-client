@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.2)
+# AMSYOS Node, protocol 1 (node 2.1.3)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -101,8 +101,8 @@ Node → Gateway, for a job it was sent:
 | `{"t": "state", "job": "j_…", "status": "running"}` | at once: the job is taken |
 | `{"t": "state", "job": "j_…", "status": "running", "progress": 40}` | the `progress` file changed (at most every 2 s) |
 | `{"t": "state", "job": "j_…", "status": "refused", "hint": "…"}` | not started: the service is not switched on, no free slot, or a GPU job while the person uses the machine. Nothing ran; the kernel places it again |
-| `{"t": "state", "job": "j_…", "status": "succeeded", "outputs": {"<name>": "<name>.<ext>"}, "took_s": 1.4}` | after every output file was put (below) |
-| `{"t": "state", "job": "j_…", "status": "failed", "error": "INVALID_PARAMS" \| "SERVICE_ERROR" \| "TIMEOUT", "hint": "…", "said": "<the end of stderr, at most 2000 characters>"}` | the run failed. Without `error.json`, the hint names the exit code and the line of stderr that says why (the last one naming an error, else the last one; stdout when stderr is empty). The kernel keeps `said` on the job: `amsyos.status` shows it |
+| `{"t": "state", "job": "j_…", "status": "succeeded", "outputs": {"<name>": "<name>.<ext>"}, "took_s": 1.4, "said": "…"}` | after every output file was put (below). `said`: the node's notes on out/ (files left out), and (2.1.3) when a job of a service left an output unmade, then the end of its stderr (stdout when stderr is empty); at most 2000 characters. The kernel fails a job that left a required output unmade, and keeps `said` and the files put as its `partial` |
+| `{"t": "state", "job": "j_…", "status": "failed", "error": "INVALID_PARAMS" \| "SERVICE_ERROR" \| "TIMEOUT", "hint": "…", "said": "<the end of stderr, at most 2000 characters>"}` | the run failed. Without `error.json`, the hint names the exit code and the line of stderr that says why (the last one naming an error, else the last one; stdout when stderr is empty). The kernel keeps `said` on the job (`amsyos.status` shows it), and any output put before, as `partial` |
 | `{"t": "state", "job": "j_…", "status": "cancelled"}` | after a cancel |
 
 Gateway → node: `{"t": "cancel", "job": "j_…"}`. The node stops the job's whole process
