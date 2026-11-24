@@ -77,7 +77,7 @@ from amsyos_cli.jobs import (
 from amsyos_cli.login import host_of, login
 from amsyos_cli.overview import overview, session_show
 from amsyos_cli.shell import cli_hint, quoted
-from amsyos_cli.space import cmd_space
+from amsyos_cli.space import cmd_node
 from amsyos_cli.watch import cmd_watch
 from amsyos_cli.work import cmd_promote, cmd_work
 
@@ -1832,8 +1832,8 @@ def parser() -> Parser:
     add_feedback(add)
     add(
         "whoami", cmd_whoami,
-        "where you stand: who, the workspace, the budget, the space, the project here, and "
-        "services to try now",
+        "where you stand: who, the workspace, the budget, your rented node, the project here, "
+        "and services to try now",
     )  # fmt: skip
 
     p = add(
@@ -1892,20 +1892,22 @@ def parser() -> Parser:
     p.add_argument("--dir", default=".", help="the repository (default here)")
 
     p = add(
-        "deploy", cmd_deploy, "build this repository on the organisation's space and define it",
+        "deploy", cmd_deploy,
+        "build this repository on the organisation's rented node and define it",
         epilog=cards.PACK_RULES, formatter_class=argparse.RawDescriptionHelpFormatter,
     )  # fmt: skip
     p.add_argument(
-        "--hours", type=float, default=1.0, help="hours of space to open when none is (default 1)"
-    )
+        "--hours", type=float, default=1.0,
+        help="hours to rent a node for when none is up (default 1)",
+    )  # fmt: skip
     p.add_argument(
         "--idle-minutes",
         type=int,
         default=15,
-        help="a space opened here closes after this many idle minutes (0: never)",
+        help="a node rented here closes after this many idle minutes (0: never)",
     )
-    p.add_argument("--gpu", help="any, rtx, or a GPU name space.show lists")
-    p.add_argument("--close", action="store_true", help="give the space back after")
+    p.add_argument("--gpu", help="any, rtx, or a GPU name node.show lists")
+    p.add_argument("--close", action="store_true", help="give the rented node back after")
     p.add_argument("--force", action="store_true", help="build even when nothing changed")
     p.add_argument(
         "--channel", choices=["dev", "stable"], default="dev",
@@ -1954,7 +1956,7 @@ def parser() -> Parser:
     p = add(
         "machine", cmd_machine,
         "this computer's cores, memory, disk and GPU; in a repository, whether it can run the "
-        "card's service here (run --local) or needs a rented machine (deploy). Free, sent nowhere",
+        "card's service here (run --local) or needs a rented node (deploy). Free, sent nowhere",
     )  # fmt: skip
     p.add_argument("--dir", help="the repository (default here)")
 
@@ -1988,7 +1990,7 @@ def parser() -> Parser:
     p.add_argument(
         "--limit", type=limit_of, metavar="TIME",
         help="end the job if it runs longer (90s, 10m, 2h): a job of your code on your "
-        "space may otherwise run as long as the space may be open",
+        "rented node may otherwise run as long as the node is rented",
     )  # fmt: skip
 
     p = add(
@@ -2082,7 +2084,7 @@ def parser() -> Parser:
     p = add("grant", cmd_grant, "ask the session's person for more")
     gsub = p.add_subparsers(dest="grant_cmd", metavar="ask", required=True)
     ga = gsub.add_parser("ask", parents=[common], help="ask for a power, services or budget")
-    ga.add_argument("--may", action="append", help="a power, e.g. space.open (again for more)")
+    ga.add_argument("--may", action="append", help="a power, e.g. node.rent (again for more)")
     ga.add_argument(
         "--services", action="append", help="a service pattern, e.g. blender.* (again for more)"
     )
@@ -2090,51 +2092,85 @@ def parser() -> Parser:
     ga.add_argument("--note", help="why, for the person")
     top.commands["grant ask"] = ga
 
+    def rented(
+        parent: argparse.ArgumentParser, dest: str, rent: str, more: str = ""
+    ) -> dict[str, argparse.ArgumentParser]:
+        """The verbs of the rented node, `amsyos node`'s and its old name `amsyos space`'s."""
+        verbs = parent.add_subparsers(
+            dest=dest, metavar=f"{rent}|show|close|extend|clean{more}", required=True
+        )
+        so = verbs.add_parser(
+            rent, parents=[common],
+            help="rent a machine for some hours, for your organisation alone (credit: "
+            "price_per_hour each)",
+        )  # fmt: skip
+        so.add_argument(
+            "--hours",
+            type=float,
+            default=1.0,
+            help="hours to buy (default 1, at most 720: 30 days; held from your credit)",
+        )
+        so.add_argument(
+            "--idle-minutes", type=int, help="close it after this many idle minutes (2 to 1440)"
+        )
+        so.add_argument("--gpu", help="any (default), rtx, or a GPU name node show --json lists")
+        ss = verbs.add_parser(
+            "show", parents=[common],
+            help="a node in full: the rented one (default: up or not, time left, charged) or an "
+            "own node",
+        )  # fmt: skip
+        ss.add_argument(
+            "node", nargs="?", help="rented (default), or an own node's id n_… (node list)"
+        )
+        sc = verbs.add_parser("close", parents=[common], help="give the rented node back now")
+        sc.add_argument(
+            "--even-if-busy", action="store_true",
+            help="close even while jobs run there: they are stopped and what they did is lost",
+        )  # fmt: skip
+        se = verbs.add_parser("extend", parents=[common], help="add hours to the rented node")
+        se.add_argument(
+            "--hours", type=float, required=True, help="hours to add (720 in all at most)"
+        )
+        sk = verbs.add_parser(
+            "clean", parents=[common],
+            help="free the rented node's disk, the node kept; nothing asked: what is on it and "
+            "its size",
+        )  # fmt: skip
+        sk.add_argument(
+            "--images", help="name@version,... or all: deleted; a kept one is made again"
+        )
+        sk.add_argument("--models", help="owner/name,... or all: deleted from the model cache")
+        sk.add_argument(
+            "--all", action="store_true",
+            help="the machine as just rented: every image, model, cache and file of yours",
+        )  # fmt: skip
+        sk.add_argument(
+            "--even-if-not-kept", action="store_true",
+            help="delete an image even when nothing is kept to make it again",
+        )  # fmt: skip
+        found = {rent: so, "show": ss, "close": sc, "extend": se, "clean": sk}
+        if more:
+            found["list"] = verbs.add_parser(
+                "list", parents=[common], help="every node: id, type (rented, own), state"
+            )
+        return found
+
     p = add(
-        "space", cmd_space, "the organisation's space: open, show, close, extend, clean",
-        "the organisation's own rented machine, where its services are built and run (spec v2 "
-        "§21): open it for some hours, show it, close it, add hours, free its disk; one line each",
+        "node", cmd_node, "your nodes: rent one, show, close, extend, clean, list",
+        "the machines where your organisation's own code runs, for it alone (spec v3 §17): a "
+        "rented node, AMSYOS rents by the hour from your credit (GPU, or none for less; images "
+        "are built on it; one at a time), and own nodes, computers of yours running AMSYOS "
+        "Node. Rent one for some hours, show one, give it back, add hours, free its disk, "
+        "list them all; one line each",
     )  # fmt: skip
-    ssub = p.add_subparsers(dest="space_cmd", metavar="open|show|close|extend|clean", required=True)
-    so = ssub.add_parser(
-        "open", parents=[common], help="rent it for some hours (credit: price_per_hour each)"
+    top.commands.update({f"node {k}": v for k, v in rented(p, "node_cmd", "rent", "|list").items()})
+    # `amsyos space …`, the old name (open is rent): still taken, listed nowhere.
+    p = sub.add_parser(
+        "space", parents=[common], description="the old name of amsyos node (open is rent)"
     )
-    so.add_argument(
-        "--hours",
-        type=float,
-        default=1.0,
-        help="hours to buy (default 1, at most 720: 30 days; held from your credit)",
-    )
-    so.add_argument(
-        "--idle-minutes", type=int, help="close it after this many idle minutes (2 to 1440)"
-    )
-    so.add_argument("--gpu", help="any (default), rtx, or a GPU name space show --json lists")
-    ss = ssub.add_parser("show", parents=[common], help="whether it is open, time left, charged")
-    sc = ssub.add_parser("close", parents=[common], help="give the machine back now")
-    sc.add_argument(
-        "--even-if-busy", action="store_true",
-        help="close even while jobs run there: they are stopped and what they did is lost",
-    )  # fmt: skip
-    se = ssub.add_parser("extend", parents=[common], help="add hours to the open space")
-    se.add_argument("--hours", type=float, required=True, help="hours to add (720 in all at most)")
-    sk = ssub.add_parser(
-        "clean", parents=[common],
-        help="free its disk, the space left open; nothing asked: what is on it and its size",
-    )  # fmt: skip
-    sk.add_argument("--images", help="name@version,... or all: deleted; a kept one is made again")
-    sk.add_argument("--models", help="owner/name,... or all: deleted from the model cache")
-    sk.add_argument(
-        "--all", action="store_true",
-        help="the machine as just rented: every image, model, cache and file of yours",
-    )  # fmt: skip
-    sk.add_argument(
-        "--even-if-not-kept", action="store_true",
-        help="delete an image even when nothing is kept to make it again",
-    )  # fmt: skip
-    top.commands.update(
-        {"space open": so, "space show": ss, "space close": sc, "space extend": se,
-         "space clean": sk}
-    )  # fmt: skip
+    p.set_defaults(func=cmd_node)
+    top.commands["space"] = p
+    top.commands.update({f"space {k}": v for k, v in rented(p, "space_cmd", "open").items()})
 
     p = add(
         "sync", cmd_sync, "the project's brief, into the host's files",

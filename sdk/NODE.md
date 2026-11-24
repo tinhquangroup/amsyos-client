@@ -5,6 +5,8 @@ How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The ke
 `drivers/node.py` (placing jobs). JSON everywhere; every message is one WebSocket text frame
 of at most 64 KiB. Nothing ever dials into the node. Node 2.1 adds the folders its person
 allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no such job.
+A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
+AMSYOS rents for the organisation, does not run it.
 
 ## 1. Joining
 

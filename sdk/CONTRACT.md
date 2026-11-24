@@ -18,7 +18,7 @@ Everything else is as it always was: `inputs` (types, defaults, limits), `output
 
 | Shape | How it is made | Its files are typed by |
 |---|---|---|
-| Own code, any language, on the organisation's space | `space.build` with `service` (or `service.define` with `image`) | the card: `means` |
+| Own code, any language, on the organisation's rented node | `node.build` with `service` (or `service.define` with `image`) | the card: `means` |
 | Steps of other services | `service.define` with `steps` | the card: `means` |
 | The organisation's own MCP server | `connection.add`, then `connection.types {connection, tool, files, makes}` | `connection.types`: which text arguments are files (the tool gets a short-lived link) and which files it returns |
 | A provider's REST API | `provider.add`, then `service.define` with `call` | the card |
@@ -27,7 +27,7 @@ The refusals of §1 apply to the first two shapes (`kernel/conform.py`, `bound`)
 
 ## 3. The job contract (own code)
 
-Each call is one run of the image's `command` in its source folder, as an unprivileged user, on the machine rented for the organisation alone. `$AMSYOS_JOB` names the job's folder:
+Each call is one run of the image's `command` in its source folder, as an unprivileged user, on its rented node: a machine rented for the organisation alone. `$AMSYOS_JOB` names the job's folder:
 
 | Path | What |
 |---|---|
@@ -37,9 +37,9 @@ Each call is one run of the image's `command` in its source folder, as an unpriv
 | `progress` | optional, 0 to 100 |
 | `error.json` | optional, `{"error": "INVALID_PARAMS" or "SERVICE_ERROR", "hint": "..."}` with exit code 1: what the caller reads to fix its call |
 
-A job may run while the space is open (at least one hour; a job past its limit fails `TIMEOUT` with its partial files and its log's end). The machine has a GPU and the Internet; no AMSYOS key is on it.
+A job may run while the rented node is up (at least one hour; a job past its limit fails `TIMEOUT` with its partial files and its log's end). The machine has a GPU and the Internet; no AMSYOS key is on it.
 
-**Languages.** `space.build` takes:
+**Languages.** `node.build` takes:
 - `runtime`: python (the default: Python 3.11 with PyTorch), node, java, go or r, installed from pinned conda-forge packages without root;
 - `system`: up to 20 more conda-forge programs (ffmpeg, imagemagick…);
 - `setup`: one build command run in the source folder (`npm ci`, `go build -o app .`, `mvn -q package`). Without one, `npm ci` runs when there is a package-lock.json.
@@ -56,12 +56,12 @@ A static binary shipped in the archive needs no runtime. Exactly what was instal
 
 Following the folder layout by hand is just as good.
 
-**A server kept warm** (optional). `space.build` takes `serve` (e.g. `python server.py`) instead of `command` or beside it. The process loads what it needs once, then does jobs one after the other. The first call is cold and the next ones are warm.
+**A server kept warm** (optional). `node.build` takes `serve` (e.g. `python server.py`) instead of `command` or beside it. The process loads what it needs once, then does jobs one after the other. The first call is cold and the next ones are warm.
 - **Protocol.** One line each way, at most 4,096 bytes. A job comes on stdin as `{"job": "<id>", "folder": "<the job's folder>"}`. The process does it with the folder contract above, then writes `{"done": "<id>"}` on stdout. Anything else on stdout goes to the job's log, so print to stderr in your own loop.
 - **Bindings.** Python `from amsyos import serve; serve(handle)`, Node `serve(async (job) => …)`, any other language a loop on `amsyos-job next` … `amsyos-job done`. `job.fail` ends the job, not the server.
 - **Who shares a process.** One process serves one service version, one workspace and one paying organisation; two buyers of an offered service never share one.
 - **Limits.** At most 2 processes a machine (fewer when the declared `vram_gb` would not fit). The one unused longest is stopped first. A process is renewed after 100 jobs or one hour.
-- **When a process stops.** A crash fails its job with the tail of stderr. A cancelled or timed-out job stops its process. Either way the next job starts cold. Processes end with the space; idle closing is unchanged, and a waiting process is not activity.
+- **When a process stops.** A crash fails its job with the tail of stderr. A cancelled or timed-out job stops its process. Either way the next job starts cold. Processes end when the rented node is given back; idle closing is unchanged, and a waiting process is not activity.
 - **After a build.** The check run goes through the server, so it is warm for the first real call.
 
 ## 4. Types of the organisation's own

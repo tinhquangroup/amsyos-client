@@ -11,8 +11,8 @@
    as Hugging Face's public API sizes their files, and PyTorch for a Blackwell GPU when
    the code imports torch; `card.PACK_RULES` says it to the reader);
 3. upload what the workspace lacks (`asset.has`): the archive and the example's files;
-4. open the organisation's space when none is open and `space.auto` would not open it;
-5. `space.build` with the card as its `service`, `source` and `channel` where the
+4. open the organisation's space when none is open and `node.auto` would not open it;
+5. `node.build` with the card as its `service`, `source` and `channel` where the
    Gateway takes them; wait for the build, then for the check of its example;
 6. print `service@version`, the build and check jobs, the check, and the cost; `--close`
    gives the space back after; then how to run it: the bare id when it runs this version,
@@ -49,7 +49,7 @@ from amsyos_cli.files import human, upload
 from amsyos_cli.jobs import check_lines, follow, status_lines
 from amsyos_cli.shell import cli_hint
 
-MOST_ARCHIVE_BYTES = 200 * 1024 * 1024  # space.build: at most 200 MB
+MOST_ARCHIVE_BYTES = 200 * 1024 * 1024  # node.build: at most 200 MB
 MOST_ARCHIVE_FILES = 5000
 STATE = Path(".amsyos") / "state" / "deploy.json"
 NEVER_DIRS = frozenset({"out", "node_modules", "__pycache__"}) | cards.SKIP_DIRS
@@ -282,7 +282,7 @@ def plan(root: Path) -> dict[str, Any]:
         raise CliError(
             "INVALID_INPUT",
             f"the archive is {human(len(archive))}: a build takes at most 200 MB; fetch large "
-            "files in `setup` instead (`amsyos describe space.build`, input setup)",
+            "files in `setup` instead (`amsyos describe node.build`, input setup)",
         )
     build = cards.build_params(card)
     fingerprint = hashlib.sha256(
@@ -474,16 +474,16 @@ async def space_ready(
 ) -> tuple[bool, str]:
     """Whether a build can have its space, said in one line before anything is uploaded
     (Claude Code for a customer, 2026-11-20: deploy uploaded the source and the example, then
-    space.open was refused). Free: `space.show` (`shown`: its answer, already asked)."""
-    shown = await api.instant("space.show") if shown is None else shown
+    node.rent was refused). Free: `node.show` (`shown`: its answer, already asked)."""
+    shown = await api.instant("node.show") if shown is None else shown
     if shown.get("enabled") is False:
-        why = str(shown.get("next") or "spaces are not switched on for your organisation")
-        return False, f"space: {cli_hint(why)}"
+        why = str(shown.get("next") or "rented nodes are not switched on for your organisation")
+        return False, f"rented node: {cli_hint(why)}"
     space = obj(shown.get("space"))
     if space.get("job"):
-        return True, f"space: {space.get('state')} ({space.get('job')})"
+        return True, f"rented node: {space.get('state')} ({space.get('job')})"
     if obj(shown.get("auto")).get("on"):
-        return True, "space: the build opens it by itself (space.auto is on)"
+        return True, "rented node: the build rents one by itself (node.auto is on)"
     cpu = gpu == "none" and isinstance(shown.get("cpu_price_per_hour"), int | float)
     price = shown.get("cpu_price_per_hour" if cpu else "price_per_hour")
     held = (
@@ -492,7 +492,7 @@ async def space_ready(
         else ""
     )
     kind = " with no GPU" if cpu else ""
-    return True, f"space: none open; deploy opens one{kind} for {hours:g} h{held} (--hours)"
+    return True, f"rented node: none up; deploy rents one{kind} for {hours:g} h{held} (--hours)"
 
 
 def wanted(path: str, patterns: list[str]) -> bool:
@@ -560,9 +560,9 @@ def _torch_need(space: dict[str, Any]) -> tuple[float | None, str]:
     """PyTorch for the GPU on the space's machine: (GB, why); GB None when the GPU is not
     known yet (no space open: a Blackwell one takes it)."""
     if not space.get("job"):
-        return None, f"about {TORCH_GB:g} GB if the space's GPU is a Blackwell, once a machine"
+        return None, f"about {TORCH_GB:g} GB if the rented GPU is a Blackwell, once a machine"
     if str(space.get("machine") or "").startswith("CPU"):
-        return 0.0, "a CPU space: the machine's own"
+        return 0.0, "a CPU node: the machine's own"
     compute = obj(space.get("gpu")).get("compute")
     try:
         cap = float(str(compute)) if compute is not None else None
@@ -581,7 +581,7 @@ async def disk_need(
     root: Path, made: dict[str, Any], shown: dict[str, Any]
 ) -> tuple[dict[str, Any], str]:
     """The disk a build needs (its models, PyTorch for the GPU) against what the space's
-    machine has free (`space.show`), and the line that says it."""
+    machine has free (`node.show`), and the line that says it."""
     models = str(obj(made["build"]).get("models") or "").split()
     rows = await model_sizes(models) if models else []
     models_gb = sum(r["bytes"] or 0 for r in rows) / 1e9
@@ -613,14 +613,14 @@ async def disk_need(
     line = f"disk: the build needs about {need:.1f} GB" + (f" ({'; '.join(bits)})" if bits else "")
     if free is None:
         told["fits"] = None
-        line += "; the machine's free disk is not known until its space is up"
+        line += "; the machine's free disk is not known until the rented node is up"
     else:
         told["free_gb"], told["total_gb"] = free, disk.get("total_gb")
         told["fits"] = need <= free
         line += f"; the machine has {free} GB free of {disk.get('total_gb')}"
         if need > free:
             line += (
-                ": not enough. Free room with amsyos space clean (alone it lists what is on the "
+                ": not enough. Free room with amsyos node clean (alone it lists what is on the "
                 "machine), or fetch only the files the code loads (a model's ':<pattern>,...')"
             )
     if models:
@@ -643,7 +643,7 @@ async def dry_run(api: Api | None, out: Out, root: Path, channel: str, hours: fl
     if answer["example_files"]:
         lines.append("example files uploaded too: " + ", ".join(answer["example_files"]))
     if api is not None:
-        shown = await api.instant("space.show")
+        shown = await api.instant("node.show")
         ok, said = await space_ready(api, hours, gpu_for(card, None), shown=shown)
         answer["space_ready"] = ok
         lines.append(said)
@@ -687,7 +687,9 @@ async def deploy(
     card: dict[str, Any] = made["card"]
     if card.get("where", "space") == "node":
         raise CliError(
-            "INVALID_CARD", "where: node is deployed with node.deploy (later); use where: space"
+            "INVALID_CARD",
+            "where: node (an own node) is deployed with node.deploy (later); use where: space "
+            "(your rented node)",
         )
     # Always said before anything is sent, not only with --dry-run (v3 T2).
     for line in file_lines(made, every=False):
@@ -713,7 +715,7 @@ async def deploy(
     version = next_version(str(card["version"]), current)
     ok, said = await space_ready(api, hours, gpu_for(card, gpu))
     if not ok:  # before anything is uploaded
-        raise CliError("FORBIDDEN", said.removeprefix("space: "))
+        raise CliError("FORBIDDEN", said.removeprefix("rented node: "))
 
     # The example's local files, then the source: only what the workspace lacks.
     example: Any = card.get("example")
@@ -795,11 +797,11 @@ async def _build(  # noqa: PLR0917 - the deploy's state, passed on
     answer: dict[str, Any],
     root: Path,
 ) -> tuple[int, list[str]]:
-    """`space.build` with the card as its service, waited for; then the version's check.
+    """`node.build` with the card as its service, waited for; then the version's check.
     Fills `answer`; returns the exit code and the lines to print."""
-    key = idempotency_key("space.build", {k: v for k, v in params.items() if k != "source"}, creds)
+    key = idempotency_key("node.build", {k: v for k, v in params.items() if k != "source"}, creds)
     began = time.monotonic()
-    started = await api.run("space.build", params, key=key, wait_s=50)
+    started = await api.run("node.build", params, key=key, wait_s=50)
     job_id = str(started["job_id"])
     answer["build_job"] = job_id
     out.note(f"building {params['name']}@{params['version']}: {job_id}")
@@ -893,7 +895,7 @@ async def _check(api: Api, out: Out, service_id: str, version: str) -> dict[str,
 
 
 async def _promote(api: Api, answer: dict[str, Any]) -> list[str]:
-    """`--channel stable` on a Gateway whose space.build takes no channel."""
+    """`--channel stable` on a Gateway whose node.build takes no channel."""
     asked = {"service": answer["service"], "version": answer["version"], "channel": "stable"}
     try:
         told = await api.maybe("service.promote", asked)
@@ -914,22 +916,22 @@ def space_line(space: dict[str, Any]) -> str:
     if isinstance(idle, int | float) and not isinstance(idle, bool) and idle > 0:
         ends = f"closes after {idle:g} idle min"
     else:
-        ends = "open all its hours: no idle close"
+        ends = "up all its hours: no idle close"
     price = space.get("price_per_hour")
     costs = f"{amount(price)} credit an hour, " if isinstance(price, int | float) else ""
-    kind = {"CPU": "a CPU space", "GPU": "a GPU space"}.get(str(space.get("class")), "a space")
+    kind = {"CPU": "a CPU node", "GPU": "a GPU node"}.get(str(space.get("class")), "a node")
     hours = space.get("hours")
     for_h = f" for {hours:g} h" if isinstance(hours, int | float) else ""
-    stop = "amsyos space close stops it now"
+    stop = "amsyos node close gives it back now"
     if space.get("opened") == "auto":
-        return f"the build opened {kind} by itself (space.auto; {costs}{ends}): {stop}"
+        return f"the build rented {kind} by itself (node.auto; {costs}{ends}): {stop}"
     if space.get("opened"):
-        return f"opened {kind}{for_h} ({costs}{ends}): {stop}"
-    return f"{kind} was open already and stays open ({costs}{ends}): {stop}"
+        return f"rented {kind}{for_h} ({costs}{ends}): {stop}"
+    return f"{kind} was rented already and stays up ({costs}{ends}): {stop}"
 
 
 def _price(shown: dict[str, Any], cpu: bool) -> float | None:
-    """The space's price an hour as `space.show` says it: the CPU class's for a CPU one."""
+    """The space's price an hour as `node.show` says it: the CPU class's for a CPU one."""
     price = shown.get("cpu_price_per_hour" if cpu else "price_per_hour")
     if isinstance(price, int | float) and not isinstance(price, bool):
         return float(price)
@@ -946,13 +948,13 @@ async def _ensure_space(
     gpu: str | None,
 ) -> dict[str, Any]:
     """The space the build runs on: the open one (`opened` false), one opened now (true),
-    or none yet because the build opens it by itself (`space.auto` on: `opened` "auto",
+    or none yet because the build opens it by itself (`node.auto` on: `opened` "auto",
     no `job`). With its `class`, `hours`, `price_per_hour` and
-    `closes_after_idle_minutes`, from the one `space.show` and what was asked."""
-    shown = await api.instant("space.show")
+    `closes_after_idle_minutes`, from the one `node.show` and what was asked."""
+    shown = await api.instant("node.show")
     space = obj(shown.get("space"))
     if space.get("job"):
-        out.note(f"space: {space.get('state')} ({space.get('job')})")
+        out.note(f"rented node: {space.get('state')} ({space.get('job')})")
         cls = space.get("class")
         return {
             "job": str(space["job"]), "opened": False, "class": cls, "hours": space.get("hours"),
@@ -961,7 +963,7 @@ async def _ensure_space(
         }  # fmt: skip
     auto = obj(shown.get("auto"))
     if auto.get("on"):
-        out.note("space: the build opens it by itself (space.auto is on)")
+        out.note("rented node: the build rents one by itself (node.auto is on)")
         return {"job": None, "opened": "auto",
                 "closes_after_idle_minutes": auto.get("idle_minutes")}  # fmt: skip
     params: dict[str, Any] = {"hours": hours}
@@ -974,9 +976,9 @@ async def _ensure_space(
     vram = resources.get("min_vram_gb") or resources.get("vram_gb")
     if isinstance(vram, int | float) and vram >= 8:
         params["min_vram_gb"] = int(vram)
-    opened = await api.run("space.open", params)
+    opened = await api.run("node.rent", params)
     out.note(
-        f"space: opening for {hours} h"
+        f"rented node: starting for {hours} h"
         + (f", closing after {idle_minutes} idle minutes" if idle_minutes else "")
         + f", est. cost {amount(opened.get('est_cost'))}: {opened.get('job_id')}"
     )
@@ -990,12 +992,14 @@ async def _ensure_space(
 
 async def _close(api: Api, out: Out, answer: dict[str, Any]) -> None:
     try:
-        closed = await api.instant("space.close")
+        closed = await api.instant("node.close")
     except CliError as exc:
         answer["close_error"] = exc.answer()
-        out.note(f"space not closed: {exc.code}: {cli_hint(exc.hint)}")
+        out.note(f"rented node not given back: {exc.code}: {cli_hint(exc.hint)}")
         return
     answer["closed"] = closed
     told = {k: closed[k] if k == "seconds" else amount(closed[k])
             for k in ("seconds", "charged", "balance") if k in closed}  # fmt: skip
-    out.note("space closed: " + (", ".join(f"{k} {v}" for k, v in told.items()) or "done"))
+    out.note(
+        "rented node given back: " + (", ".join(f"{k} {v}" for k, v in told.items()) or "done")
+    )

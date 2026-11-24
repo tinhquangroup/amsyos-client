@@ -16,6 +16,6 @@ description: Use AMSYOS when the work needs a GPU or more compute than this mach
   the credit ("default estimate": no run yet); `amsyos result`: the real cost and time, by step.
 - `amsyos deploy` prints the files it packs, then `service@version` with the check of the
   card's example: exit 0 when defined (a check still running says its job), 1 on a real
-  failure with the hint (`amsyos logs <job>` for a failed build). A closed space says `closed`.
+  failure with the hint (`amsyos logs <job>` for a failed build). A node given back says `closed`.
 - Outputs are copied into `./out/<job>/`; open them there. `as inputs` lists `asset://`
   references another service takes directly, with no upload.

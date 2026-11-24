@@ -1,6 +1,6 @@
 """What this computer has, against what a card's service needs (the owner, 2026-11-20):
 before `amsyos run --local` runs a service here, the AI client's machine is checked, and
-one that is not strong enough sends the work to a rented machine (the space) instead.
+one that is not strong enough sends the work to a rented node instead.
 
 `probe()` reads the machine with the standard library and `nvidia-smi` when there is one:
 cores, memory, free disk, CUDA GPUs and their memory. `fits()` compares it with the card's
@@ -22,8 +22,8 @@ from typing import Any
 from amsyos_cli.common import obj, seq
 
 DISK_MARGIN_GB = 1.0  # beside what the job declares: its folder, the program's own files
-GPU_PRICE_NOTE = "a GPU space"
-CPU_PRICE_NOTE = "a space with no GPU (--gpu none)"
+GPU_PRICE_NOTE = "a rented node with a GPU"
+CPU_PRICE_NOTE = "a rented node with no GPU (--gpu none)"
 
 
 def _ram_gb() -> tuple[float | None, float | None]:
@@ -128,7 +128,7 @@ def fits(card: dict[str, Any], machine: dict[str, Any]) -> dict[str, Any]:
         elif vram is not None and best < vram:
             lacks.append(f"a GPU with {vram:g} GB (the largest here has {best:g} GB)")
     elif gpu == "optional" and not gpus:
-        notes.append("no CUDA GPU here: it runs on the CPU, slower than on a GPU space")
+        notes.append("no CUDA GPU here: it runs on the CPU, slower than on a rented GPU node")
     for key, have, unit in (
         ("cpu", machine.get("cpus"), " cores"),
         ("ram_gb", machine.get("ram_gb"), " GB of memory"),
@@ -153,8 +153,8 @@ def too_small_hint(service: str, judged: dict[str, Any]) -> str:
     `deploy --dry-run` shows first."""
     return (
         f"this machine is not strong enough for {service or 'this service'}: it lacks "
-        f"{'; '.join(judged['lacks'])}. Run it on a rented machine instead: `amsyos deploy "
-        f"--dry-run` says the space ({judged['space']}) and the credit its hours hold, then "
+        f"{'; '.join(judged['lacks'])}. Run it on a rented node instead: `amsyos deploy "
+        f"--dry-run` says what it rents ({judged['space']}) and the credit its hours hold, then "
         "`amsyos deploy`. Or `amsyos run --local --force` to try here anyway."
     )
 
@@ -179,7 +179,7 @@ def lines(machine: dict[str, Any], judged: dict[str, Any] | None) -> list[str]:
     else:
         said.append("does not fit the card's resources: " + "; ".join(judged["lacks"]))
         said.append(
-            f"use a rented machine: `amsyos deploy --dry-run` ({judged['space']}), then "
+            f"use a rented node: `amsyos deploy --dry-run` ({judged['space']}), then "
             "`amsyos deploy`"
         )
     said.extend(f"  note: {n}" for n in judged["notes"])

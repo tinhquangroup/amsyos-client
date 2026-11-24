@@ -1,8 +1,8 @@
 """`amsyos whoami`: where the caller stands, in one answer (Codex, 2026-11-20: it had to put
-`whoami`, `space show`, `sync` and several `discover`s together to see it).
+`whoami`, `node show`, `sync` and several `discover`s together to see it).
 
-Who, the workspace and the budget (`session.show`), then one line each for the space
-(`space.show`), the project bound here (read from this folder, no call), and "Try now:" a
+Who, the workspace and the budget (`session.show`), then one line each for the rented node
+(`node.show`), the project bound here (read from this folder, no call), and "Try now:" a
 few services of the kernel's starting list (`amsyos.discover` with no query), and a line
 when AMSYOS's team replied lately to the workspace's feedback (`feedback.list`; silent when
 it fails). Free calls only, all at once; one that fails is said on its line and the rest
@@ -24,11 +24,11 @@ from amsyos_cli.space import overview_line
 
 TRY_NOW = 5  # services of the starting list said under "Try now:"
 LISTED = 10  # read of that list, to leave out what follows
-# What this command calls by itself behind one of its own commands (whoami, space show,
+# What this command calls by itself behind one of its own commands (whoami, node show,
 # files, init, sync, why, card): the workspace "used" them through the CLI, but they are no
 # services to try (the t4 desk's list began with session.show, whoami's own call).
 CLI_OWN = frozenset({
-    "session.show", "session.revoke", "workspace.list", "space.show", "asset.has",
+    "session.show", "session.revoke", "workspace.list", "node.show", "node.list", "asset.has",
     "asset.url", "asset.list", "project.bind", "project.brief", "project.why",
     "service.check", "capability.contract",
 })  # fmt: skip
@@ -163,7 +163,7 @@ async def overview(
     who = session_show(api) if shown is None else _given(shown)
     told, space, listed, heard = await asyncio.gather(
         who,
-        api.instant("space.show"),
+        api.instant("node.show"),
         api.discover("", limit=LISTED),
         api.instant("feedback.list", {"limit": 5}),
         return_exceptions=True,
@@ -173,7 +173,7 @@ async def overview(
     answer: dict[str, Any] = {"gateway": api.creds.gateway, **public(told)}
     lines = whoami_lines(told, api.creds)
     if isinstance(space, BaseException):
-        answer["space"], line = _failed("space", space)
+        answer["space"], line = _failed("rented node", space)
     else:
         answer["space"], line = space, overview_line(space)
     lines.append(line)

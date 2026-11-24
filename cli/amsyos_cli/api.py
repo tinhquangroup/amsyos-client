@@ -319,7 +319,7 @@ def _first_cause(exc: BaseException) -> str:
 
 
 # One invocation of the command line: a call it sends again after a lost answer keeps its key
-# and runs once; the same command typed again later is a new call (v3 T2: `space.show` run
+# and runs once; the same command typed again later is a new call (v3 T2: `node.show` run
 # twice answered the first, stale job).
 _INVOCATION = time.time_ns()
 

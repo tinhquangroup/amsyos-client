@@ -33,7 +33,7 @@ def with_id(status: dict[str, Any], job_id: str) -> dict[str, Any]:
 
 
 def space_closed(status: dict[str, Any]) -> bool:
-    """A `space.open` job whose space was closed: its job says `cancelled` (how a space ends
+    """A `node.rent` job whose space was closed: its job says `cancelled` (how a space ends
     before its hours) or `succeeded` (its hours were up), which is its ordinary end, no
     failure (v3 T2: `cancelled, 1%` after a normal close read as one)."""
     space = obj(status.get("space"))
@@ -62,7 +62,7 @@ def status_line(status: dict[str, Any]) -> str:
         parts.append(eta)
     space = obj(status.get("space"))
     if space.get("state"):
-        parts.append(f"space {space['state']}")
+        parts.append(f"rented node {space['state']}")
     return ", ".join(parts)
 
 
@@ -297,7 +297,7 @@ def status_lines(status: dict[str, Any]) -> list[str]:
     for key in ("minutes_left", "charged_so_far", "seconds", "charged", "warning", "stopped"):
         if key in space:
             said = amount(space[key]) if key.startswith("charged") else short(space[key], 200)
-            lines.append(f"  space {key}: {said}")
+            lines.append(f"  rented node {key}: {said}")
     return lines + [f"  {line}" for line in request_lines(status)]
 
 

@@ -21,9 +21,9 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
 - This repository as a service: `amsyos init` binds it and proposes `amsyos.yaml` (fill each
   `<fill: ...>`; `amsyos card --help`: every key); a desk of many services: `--type studio`, one
   that only uses services: `--type work`. `amsyos card --check` (AMSYOS too, free); `amsyos run
-  --local` tries it here, free; MACHINE_TOO_SMALL: the space, `deploy --dry-run`, `deploy [--channel
-  stable]`; `amsyos promote <service> <version>`; `amsyos contract <gp_...|service|need>`: what a
-  build must meet. The space: `amsyos space show|open [--hours h] [--gpu none]|extend|close`.
+  --local` tries it here, free; MACHINE_TOO_SMALL: `deploy --dry-run`, `deploy [--channel stable]`
+  on a rented node; `amsyos promote <service> <version>`; `amsyos contract <gp_...|service|need>`:
+  what a build must meet. Nodes: `amsyos node list|show|rent [--hours h] [--gpu none]|extend|close`.
 - A patch output: `amsyos result <job> --apply` names the files, then `git apply --3way`.
 - Beside other agents of the workspace: `amsyos run note.post topic=<t> text=...`, `note.list
   topic=<t>` (its subtopics too); `lease.take what=<x>` while you change something, `lease.release`
@@ -31,7 +31,7 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
 - Refused for a power or the budget: `amsyos grant ask --may <power>`, `--services <id>` or
   `--budget <credit>`, then wait for the person. Never work around a refusal.
 - Every error carries `hint`: the next action to take. `--verbose` says what fell back.
-- Credit is real money: open a space only for the hours needed; `deploy --close` gives it back.
+- Credit is real money: rent a node only for the hours needed; `deploy --close` gives it back.
 - When a task that used AMSYOS ends (done or given up), send AMSYOS's team one feedback if
   anything was slow, unclear, wrong or missing, or worked notably well: `amsyos feedback "<what
   happened; what you expected>" --job <ids> --kind friction|bug|idea|praise`, with the command,

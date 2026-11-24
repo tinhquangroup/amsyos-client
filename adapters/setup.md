@@ -8,7 +8,7 @@ cap of {{BUDGET}} credit (your organisation's credit pays for it), until {{UNTIL
 
 AMSYOS adds what this machine lacks: GPU and other compute, work that outlives this session,
 your organisation's own services and those other organisations offer it, and memory of this
-project's past work. AMSYOS itself ships platform services (files, plans, tasks, spaces, notes);
+project's past work. AMSYOS itself ships platform services (files, plans, tasks, nodes, notes);
 services of a field (media, documents, 3D) come from organisations, yours or one offering them.
 
 ## To the AI agent reading this

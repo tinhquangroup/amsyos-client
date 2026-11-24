@@ -54,10 +54,10 @@ from amsyos_cli.common import CliError, Out, obj, seq
 from amsyos_cli.files import human, text_of
 
 LONG_HELP = (
-    "run --local: runs your code here, as the space would; nothing is sent. In a repository "
-    "with amsyos.yaml: a job folder made as the space makes it (job.json from the card's "
-    "example; params k=v or k=@file change it), the card's command run there with the job "
-    "module (import amsyos, amsyos-job), then its outputs checked against the card's "
+    "run --local: runs your code here, as your rented node would; nothing is sent. In a "
+    "repository with amsyos.yaml: a job folder made as a rented node makes it (job.json from "
+    "the card's example; params k=v or k=@file change it), the card's command run there with "
+    "the job module (import amsyos, amsyos-job), then its outputs checked against the card's "
     "outputs and its tests, as deploy's check would. Free. --keep keeps the job's folder "
     "in <out>/<job>/ of the repository (default out/, which deploy never packs)."
 )
@@ -709,10 +709,12 @@ def _judge(
     out = job / "out"
     for path in sorted(out.iterdir()) if out.is_dir() else []:
         if path.is_dir() and not path.is_symlink():
-            told.notes.append(f"out/{path.name}/ is a folder: the space takes files only")
+            told.notes.append(f"out/{path.name}/ is a folder: a rented node takes files only")
             continue
         if path.is_symlink() or not path.is_file() or not FILE_NAME.fullmatch(path.name):
-            told.notes.append(f"out/{path.name}: not taken (a link, or a name the space refuses)")
+            told.notes.append(
+                f"out/{path.name}: not taken (a link, or a name a rented node refuses)"
+            )
             continue
         row: dict[str, Any] = {"file": f"out/{path.name}", "size": path.stat().st_size}
         if path.stem in declared:
@@ -882,7 +884,7 @@ def run_here(
             version = _version_of(python)
             runtime = f"Python {version or '?'} from {whose}"
             if version and version != SPACE_PYTHON:
-                runtime += f" (the space runs {SPACE_PYTHON})"
+                runtime += f" (a rented node runs {SPACE_PYTHON})"
         env = _env(job, sdk, bin_dir, card, python_bin)
         if not Path(words[0]).is_absolute() and "/" not in words[0]:
             words[0] = shutil.which(words[0], path=env[path_key(env)]) or words[0]
@@ -919,7 +921,7 @@ def run_here(
             lines.insert(
                 -1,
                 "(it ran in a copy of what deploy packs: a file .gitignore leaves out is not "
-                "there, as on the space)",
+                "there, as on a rented node)",
             )
         if keep is not None:
             answer["folder"] = str(base)

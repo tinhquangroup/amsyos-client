@@ -1,6 +1,6 @@
 """`amsyos.yaml`: the file form of a contract-1 card plus how the service is built
 (spec v3 §7.1). Proposed by `amsyos init` from the code it finds (amsyos_cli/infer.py),
-read by `amsyos deploy` and turned into the `service` of `space.build` ({name, version,
+read by `amsyos deploy` and turned into the `service` of `node.build` ({name, version,
 spec}, spec v2 §21, §25). `amsyos card --help` explains every key (CARD_HELP).
 
 The card's inputs may be written in JSON-Schema words (`type: string`, `enum: [...]`,
@@ -122,11 +122,12 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
   summary     What one call takes and makes, in English, 3 to 120 characters. discover
               finds the service by it.
   tags        Up to 20 words discover also finds it by: [csv, chart, plot].
-  where       space: the organisation's own rented machine (default). node: a computer
-              of the organisation's joined as its node (deployed with node.deploy).
-  image       The image's name on the space (default: the service's, dots as _). Cards
-              naming the same image share it: each build replaces what it runs for all of
-              them, and AMSYOS runs the others' examples again. The version is the card's.
+  where       space: the organisation's rented node (default). node: an own node, a
+              computer of the organisation's joined with AMSYOS Node (node.deploy).
+  image       The image's name on the rented node (default: the service's, dots as _).
+              Cards naming the same image share it: each build replaces what it runs for
+              all of them, and AMSYOS runs the others' examples again. The version is the
+              card's.
   runtime     python | node | java | go | r. python is 3.11 with PyTorch.
   system      Programs from conda-forge, name or name=version: [ffmpeg, imagemagick=7.1.2].
               init proposes those the code runs (subprocess, os.system, shutil.which:
@@ -138,7 +139,7 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               [--strip 1]": once a machine, one copy on the disk for all your images.
   command     The command started once a job, in the code's folder: python main.py.
   serve       Instead of command or beside it: a server kept warm between jobs
-              (python server.py); see `amsyos describe space.build`, input serve.
+              (python server.py); see `amsyos describe node.build`, input serve.
   models      Public Hugging Face models the code loads, pinned: ["org/name@<40 hex>"].
   resources   What one job takes of the machine: {gpu: none|optional|required,
               min_vram_gb: 12, cpu: 2, ram_gb: 8, disk_gb: 4}.
@@ -685,7 +686,7 @@ def image_of(card: dict[str, Any]) -> str:
 
 
 def build_params(card: dict[str, Any]) -> dict[str, Any]:
-    """`space.build`'s params from the card, beside name, version, files and service."""
+    """`node.build`'s params from the card, beside name, version, files and service."""
     told: dict[str, Any] = {"runtime": card.get("runtime", "python")}
     for key, joiner in (("system", " "), ("packages", "\n"), ("models", " ")):
         if card.get(key):
@@ -1230,7 +1231,7 @@ NOT_PACKAGED = {
     "blender": (
         "conda-forge does not package Blender: fetch it pinned when the image is made "
         "(setup: amsyos-fetch <url> --sha256 <hex> --unpack --strip 1 --to blender; "
-        "`amsyos describe space.build`, setup's example)"
+        "`amsyos describe node.build`, setup's example)"
     ),
 }
 # On every space already (Ubuntu 22.04, Python 3.11, the runtimes, amsyos-job).
@@ -1592,7 +1593,7 @@ def from_mcp(
     return notes
 
 
-# On the space's Python already (space.build: torch, torchvision, numpy, pillow, requests)
+# On the space's Python already (node.build: torch, torchvision, numpy, pillow, requests)
 # and the job's own module: never asked of pip again.
 PREINSTALLED = frozenset({"torch", "torchvision", "numpy", "PIL", "requests", "amsyos"})
 # Where a module's name is not its pip package's.
@@ -1682,7 +1683,7 @@ TEMPLATE: tuple[tuple[str, str, str], ...] = (
     ("version", '"1.0" (deploy counts the patch) or "1.0.3", in quotes', '"1.0"'),
     ("summary", "what one call takes and makes, English, 3 to 120 characters", ""),
     ("tags", "words discover also finds it by", "[csv, chart]"),
-    ("where", "space (the organisation's rented machine) | node (its own computer)", "space"),
+    ("where", "space (the organisation's rented node) | node (an own node)", "space"),
     ("runtime", "python | node | java | go | r", "python"),
     ("system", "programs from conda-forge, name or name=version", "[ffmpeg]"),
     ("packages", "pip packages; unset: requirements.txt", "[numpy==2.1.3]"),
