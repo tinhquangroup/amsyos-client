@@ -114,6 +114,8 @@ def _clean_line(told: dict[str, Any]) -> str:
         bits.append(f"{told['freed_gb']} GB freed")
     images = [
         f"{obj(i).get('image')} {obj(i).get('gb')} GB"
+        # What deleting it alone frees: the rest is shared with other images or kept once.
+        + (f" (frees ~{obj(i)['alone_gb']} GB alone)" if obj(i).get("alone_gb") is not None else "")
         + (" (unfinished build)" if obj(i).get("unfinished") else "")
         for i in seq(on.get("images"))
     ]
