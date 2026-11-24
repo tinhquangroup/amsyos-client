@@ -126,14 +126,20 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               Linux computer of the organisation's joined with AMSYOS Node, at full:
               deploy builds there by node.exec (an admin), --node n_… when there are
               several; free (`amsyos deploy --help` says the steps).
-  image       The image's name on the rented node (default: the service's, dots as _).
-              Cards naming the same image share it: each build replaces what it runs for
-              all of them, and AMSYOS runs the others' examples again. The version is the
-              card's.
+  image       The image's name (default: the service's, dots as _). Cards naming the same
+              image share it. On a rented node each build replaces what it runs for all of
+              them, and AMSYOS runs the others' examples again; the version is the card's.
+              On an own node (where: node), deploy in the top card's folder builds it once
+              and deploys every card below it that names it with where: node, each with its
+              own name, version, inputs and tests, its command run in the top card's folder
+              (--only services/a,. picks some; job.service tells their jobs apart).
   runtime     python | node | java | go | r. python is 3.11 with PyTorch.
   system      Programs from conda-forge, name or name=version: [ffmpeg, imagemagick=7.1.2].
               init proposes those the code runs (subprocess, os.system, shutil.which:
               ffmpeg and ffprobe → ffmpeg). Blender is not on conda-forge: setup fetches it.
+              On an own node their libraries are in $CONDA_PREFIX/lib, kept off the loader's
+              path so the system's programs keep theirs: start a pip wheel's program that
+              needs one (Chromium: nss, gbm) with LD_LIBRARY_PATH=$CONDA_PREFIX/lib.
   packages    pip packages (Python): [numpy==2.1.3]. Empty: requirements.txt is used;
               without one, init proposes the packages the code imports.
   setup       A command run once when the image is made: "npm ci", "go build -o app .".
@@ -159,7 +165,9 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
                 name: {type: file, means: sheet}    (means: what the file is; below)
               The program reads them from $AMSYOS_JOB/job.json ({"params": {...},
               "inputs": {"name": "in/<file>"}}), or `from amsyos import job` (job.params,
-              job.input("name")), or `amsyos-job param name` in any language.
+              job.input("name"); job.service, the id of the service the job is for, which
+              tells apart the cards that share an image; job.service_version; job.folder,
+              the job's folder), or `amsyos-job param name` in any language.
   outputs     What a call makes, one file each: name: {type: file, format: png,
               means: image}. The program writes out/<name>.<format> in its job folder.
               Data a program reads back: format npy, npz, bin or parquet, means data.

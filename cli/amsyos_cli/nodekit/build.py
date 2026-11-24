@@ -285,6 +285,8 @@ def fetch_models(asked: dict[str, object], env: Path, base: Path) -> None:
 
 
 def setup(asked: dict[str, object], src: Path, env: Path, base: Path) -> None:
+    """The card's `setup`, in the code's folder, with the environment as a job has it (run.sh):
+    its bin/ first on PATH, its lib/ not on LD_LIBRARY_PATH ($CONDA_PREFIX/lib)."""
     command = str(asked.get("setup") or "").strip()
     if not command:
         return

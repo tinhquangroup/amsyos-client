@@ -1314,22 +1314,25 @@ def _agents(asked: str | None) -> list[str]:
 
 async def cmd_deploy(args: argparse.Namespace, out: Out) -> int:
     root = Path(args.dir).resolve()
+    only = [p for p in str(args.only).split(",") if p.strip()] if args.only else None
     if args.dry_run:
         try:
             creds = credentials()
             async with Api(creds, out) as api:
-                return await dry_run(api, out, root, args.channel, args.hours, node=args.node)
+                return await dry_run(
+                    api, out, root, args.channel, args.hours, node=args.node, only=only
+                )
         except CliError as exc:
             if exc.code.startswith("INVALID") or exc.code in {"NO_CARD", "CREDENTIALS_FILE"}:
                 raise
             out.debug(f"dry run without AMSYOS ({exc.code})")
-        return await dry_run(None, out, root, args.channel)
+        return await dry_run(None, out, root, args.channel, node=args.node, only=only)
     creds = credentials()
     async with Api(creds, out) as api:
         return await deploy(
             api, out, creds, root,
             hours=args.hours, idle_minutes=args.idle_minutes or None, close=args.close,
-            gpu=args.gpu, force=args.force, channel=args.channel, node=args.node,
+            gpu=args.gpu, force=args.force, channel=args.channel, node=args.node, only=only,
         )  # fmt: skip
 
 
@@ -1913,6 +1916,11 @@ def parser() -> Parser:
         "--node", metavar="n_…",
         help="where: node: the own node to build on, its id or name (amsyos node list), when "
         "the organisation has several",
+    )  # fmt: skip
+    p.add_argument(
+        "--only", metavar="DIR,…",
+        help="where: node: deploy only these of the cards that share the image, by their folder "
+        "from the top card's ('.' is the top card); default every one",
     )  # fmt: skip
     p.add_argument("--close", action="store_true", help="give the rented node back after")
     p.add_argument("--force", action="store_true", help="build even when nothing changed")

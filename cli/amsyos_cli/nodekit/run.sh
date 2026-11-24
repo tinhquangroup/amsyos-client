@@ -3,6 +3,10 @@
 # (and serve) is `sh _node/run.sh <its image folder> '<the card's command>'`: the command runs
 # in the image folder that build.py made, with its environment first on PATH. Hugging Face's
 # cache is read offline; caches and temporary files stay in the job's own folder.
+# $ENV_DIR/lib is not put on LD_LIBRARY_PATH: the environment's own programs find it by their
+# RPATH, and a system program the job calls (git, curl, the node's python3) keeps its own
+# libraries. A pip wheel's program that needs a library of the card's `system` (Chromium: nss,
+# gbm) is started with LD_LIBRARY_PATH="$CONDA_PREFIX/lib" by the job, for that process alone.
 set -e
 IMG=$1
 . "$IMG/_node/where.env"

@@ -138,12 +138,20 @@ The links are signed by the kernel for this job and this node only, and expire.
   (`amsyos-node job <params|param|input|service|service-version|output|progress|fail|next|done> …`,
   and a copy named `amsyos-job` on the job's `PATH`).
 - **The Python job module (2.1.2).** `from amsyos import job, serve` (`sdk/amsyos`, built into
-  the program) works in every job, whatever account it runs as: `setup` writes it into
+  the program; `job.params`, `job.input(name)`, `job.service` and `job.service_version`, by
+  which services that share one folder or image tell their jobs apart, and `job.folder`, the
+  job's folder) works in every job, whatever account it runs as: `setup` writes it into
   `bin/python` (Windows `%ProgramData%\AMSYOS\Node\bin\python`, Linux
   `/usr/local/lib/amsyos-node/python`), which is on every job's `PYTHONPATH`. A PYTHONPATH the
   service's command sets wins; a job run as the node's own account has the node's own
   PYTHONPATH first. `run` writes the module when it can and otherwise says to run `setup`
   again, as it does when `amsyos-job` is not this program's copy.
+- **A service `amsyos deploy` built here** (the card's `where: node`) runs its command through
+  `_node/run.sh` in its image's folder, the environment's `bin/` first on `PATH` and
+  `CONDA_PREFIX` the environment; its `lib/` is not on `LD_LIBRARY_PATH`, in a job or in
+  `setup`, so the system's programs keep their own libraries: a pip wheel's program that needs
+  a library of the card's `system` (Chromium: nss, gbm) is started with
+  `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`.
 - **A server kept warm (2.1.2; contract 1 §3).** A service switched on with `enable … --serve
   "<command line>"`, or deployed with `serve` (§5), beside or instead of its command:
   - the node starts the server, in the service's folder, for a job, and keeps it for the next

@@ -50,7 +50,7 @@ A static binary shipped in the archive needs no runtime. Exactly what was instal
 
 | Language | Use |
 |---|---|
-| Python | `from amsyos import job`: `job.params`, `job.input(name)`, `job.output(name, ".png")`, `job.progress(40)`, `job.fail(hint)`, `job.service` and `job.service_version` |
+| Python | `from amsyos import job`: `job.params`, `job.input(name)`, `job.output(name, ".png")`, `job.progress(40)`, `job.fail(hint)`, `job.service` and `job.service_version` (services that share an image tell their jobs apart by it), `job.folder` (the job's folder) |
 | Node | `const { job } = require("amsyos")` (or `import { job } from "amsyos"`): the same surface (`job.serviceVersion`) |
 | Any other | the command `amsyos-job`: `params`, `param <name> [--raw]`, `input <name>`, `output <name> [.ext]`, `progress <n>`, `fail <hint> [code]`, `service`, `service-version` |
 
