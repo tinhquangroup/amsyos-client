@@ -506,7 +506,7 @@ async def show_result(
         "files": [s.row(root) for s in saved],
         "assets": result.get("assets") or {},
     }
-    for key in ("data", "work", "steps", "marks", "vote"):
+    for key in ("data", "work", "steps", "marks", "vote", "then"):
         if result.get(key):
             answer[key] = result[key]
     if outputs and (values or out.show_urls):
@@ -539,9 +539,33 @@ async def show_result(
         lines.append("as inputs: " + ", ".join(f"{k}={v}" for k, v in assets.items()))
     if result.get("data") is not None:
         lines.append("data: " + short(result["data"], 2000))
+    lines += then_lines(obj(result.get("then")))
     if emit:
         out.emit(answer, *lines)
     return Shown(0, answer, saved, lines)
+
+
+def then_lines(then: dict[str, Any]) -> list[str]:
+    """What this workspace usually ran next with a file this service made (the kernel's
+    `then`, shown only when its history is clear): a guess to save a search, never an
+    order."""
+    usual = [obj(u) for u in then.get("usually") or [] if isinstance(u, dict)]
+    if not usual:
+        return []
+    said = [
+        f"{u.get('service')} ({u.get('times')} of {then.get('after')}"
+        + (f", {u.get('takes')}" if u.get("takes") else "")
+        + ")"
+        for u in usual
+    ]
+    lines = ["usually next here: " + "; ".join(said)]
+    skill = obj(then.get("skill"))
+    if skill.get("id"):
+        lines.append(
+            f"  as a way of working: {skill['id']} ({skill.get('state')}, "
+            f"{skill.get('steps')} steps): amsyos run skill.describe skill={skill['id']}"
+        )
+    return lines
 
 
 def _rel(path: Path) -> str:
