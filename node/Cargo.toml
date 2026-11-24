@@ -1,6 +1,6 @@
 [package]
 name = "amsyos-node"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 description = "AMSYOS Node: makes an organisation's own computer a place where its services run (spec v2 §26, sdk/NODE.md)"
 license = "Apache-2.0"  # open source since 2026-11-21 (scripts/open_export.sh)

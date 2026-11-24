@@ -141,7 +141,9 @@ The links are signed by the kernel for this job and this node only, and expire.
 - **Isolation.** The node never runs as SYSTEM or root (it refuses to start so). Each job
   runs as the low-privilege account `amsyos-job` (made once by `amsyos-node setup`, as an
   administrator), sees only its own job folder, and is held to its `limits`: a Job Object on
-  Windows (memory, CPU rate, killed with the node), cgroups or rlimits on Linux. What the
+  Windows (memory, CPU rate, killed with the node), cgroups or rlimits on Linux (without a
+  systemd user scope: the memory a process writes, RLIMIT_DATA, never its address space, which
+  Chromium, V8, Go and Java reserve far beyond use; node 2.1.1). What the
   node keeps of a job (process id, exit code, log) is in the node's own folder, out of the
   job's reach. A workstation runs jobs at low priority.
 - **Where things are.** Windows: the node's folder `%LOCALAPPDATA%\AMSYOS\Node` (key,

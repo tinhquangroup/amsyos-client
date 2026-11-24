@@ -170,8 +170,8 @@ mod unix {
         args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
     }
 
-    /// `launch --job <folder> --dir <service folder> --bin <dir> --nice <n> --as <bytes>
-    /// --cpu-s <seconds> -- <command line>`
+    /// `launch --job <folder> --dir <service folder> --bin <dir> --nice <n> --mem <bytes>
+    /// --cpu-s <seconds> -- <command line>` (`--as` is the old name of `--mem`)
     pub fn launch(args: &[String]) -> Result<i32, String> {
         let split = args.iter().position(|a| a == "--").ok_or("launch: -- <command> is missing")?;
         let (opts, command) = (&args[..split], args[split + 1..].join(" "));
@@ -179,7 +179,7 @@ mod unix {
         let dir = value(opts, "--dir").ok_or("launch: --dir")?;
         let bin = value(opts, "--bin").unwrap_or("/usr/local/lib/amsyos-node");
         let nice: i32 = value(opts, "--nice").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let as_bytes: u64 = value(opts, "--as").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let mem: u64 = value(opts, "--mem").or_else(|| value(opts, "--as")).and_then(|v| v.parse().ok()).unwrap_or(0);
         let cpu_s: u64 = value(opts, "--cpu-s").and_then(|v| v.parse().ok()).unwrap_or(0);
         if command.trim().is_empty() {
             return Err("launch: the command is empty".into());
@@ -198,8 +198,11 @@ mod unix {
                 libc::setrlimit(res, &r);
             };
             limit(libc::RLIMIT_CORE, 0, 0);
-            if as_bytes > 0 {
-                limit(libc::RLIMIT_AS, as_bytes, as_bytes);
+            // The memory a process writes (RLIMIT_DATA: its heap and private writable maps),
+            // not its address space: Chromium, V8, Go and Java reserve far more address
+            // space than they ever use, and die under RLIMIT_AS (node 2.1.1).
+            if mem > 0 {
+                limit(libc::RLIMIT_DATA, mem, mem);
             }
             if cpu_s > 0 {
                 limit(libc::RLIMIT_CPU, cpu_s, cpu_s + 5);

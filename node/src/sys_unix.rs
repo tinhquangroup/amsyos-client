@@ -235,7 +235,7 @@ fn cgroups_ok() -> bool {
             util::run_bounded(&run, &["--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=1G", "true"], 5),
             Some((0, _, _))
         );
-        info!("job limits: {}", if ok { "a systemd user scope (MemoryMax, CPUQuota)" } else { "rlimits (address space, CPU time)" });
+        info!("job limits: {}", if ok { "a systemd user scope (MemoryMax, CPUQuota)" } else { "rlimits (written memory, CPU time)" });
         ok
     })
 }
@@ -362,10 +362,10 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     let job = l.job_dir.to_string_lossy().into_owned();
     let dir = l.service_dir.to_string_lossy().into_owned();
     let nice = if l.server { "0" } else { "10" };
-    let as_bytes = if scoped { "0".to_string() } else { mem.to_string() };
+    let mem_bytes = if scoped { "0".to_string() } else { mem.to_string() };
     cmd.args(["-n", "-u", JOB_USER, "--", &wrapper, "launch"])
         .args(["--job", &job, "--dir", &dir, "--bin", &bin, "--nice", nice])
-        .args(["--as", &as_bytes, "--cpu-s", &cpu_s.to_string(), "--", &l.command]);
+        .args(["--mem", &mem_bytes, "--cpu-s", &cpu_s.to_string(), "--", &l.command]);
     cmd.env_clear().env("PATH", SYS_PATH);
     for keep in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
         if let Some(v) = std::env::var_os(keep) {
