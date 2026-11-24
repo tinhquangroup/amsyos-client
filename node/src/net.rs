@@ -23,7 +23,7 @@ use tokio_tungstenite::Connector;
 
 use crate::config::{self, Access, Config, Service, Services};
 use crate::exec::{self, Limits};
-use crate::{folder, info, machine, sys, util, warn};
+use crate::{folder, info, machine, pymod, serve, sys, util, warn};
 
 const FRAME_MAX: usize = 64 << 10;
 const HINT_MAX: usize = 500;
@@ -179,6 +179,9 @@ struct JobMsg {
     as_node: bool,
     /// Node 2.1: input → (folder name, path under it), read in place (folder.rs).
     folders: BTreeMap<String, (String, String)>,
+    /// Node 2.1.2: who may share a warm server with this job, as the kernel says it (a digest
+    /// of its workspace and who pays); None: a server of its own (serve.rs).
+    serve_key: Option<String>,
 }
 
 struct Ctx {
@@ -192,6 +195,8 @@ struct Ctx {
     running: Mutex<HashMap<String, watch::Sender<bool>>>,
     /// The level and services the last hello or beat said.
     said: Mutex<String>,
+    /// Node 2.1.2: the servers kept warm.
+    pool: serve::Shared,
 }
 
 impl Ctx {
@@ -329,17 +334,31 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
     let nd = node_dir.clone();
     let (machine, _, note) = tokio::task::spawn_blocking(move || machine::probe_checked(&root, &nd)).await.map_err(|e| e.to_string())?;
     info!("{note}");
+    // Node 2.1.2: the Python job module on every job's PYTHONPATH, and `amsyos-job` (`next`,
+    // `done`) the same program as this one; `setup` writes both where the node's user may not.
+    match tokio::task::spawn_blocking(pymod::install).await.map_err(|e| e.to_string())? {
+        Ok(true) => info!("the Python job module: written in {}", config::python_dir().display()),
+        Ok(false) => {}
+        Err(e) => warn!("the Python job module is missing or old ({e}): run `{}` again", setup_hint()),
+    }
+    if !same_program() {
+        warn!("{} is not this program's copy: run `{}` again, or servers (`next`, `done`) and new job features fail", config::job_bin().display(), setup_hint());
+    }
+    let left = jobs_root.clone();
+    let _ = tokio::task::spawn_blocking(move || serve::clean_left(&left)).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let slots = cfg.slots(machine.cpus);
     let ctx = Arc::new(Ctx {
         node_dir,
         jobs_root: jobs_root.clone(),
         gateway,
         http: http()?,
         server: cfg.is_server(),
-        slots: cfg.slots(machine.cpus),
+        slots,
         out: tx,
         running: Mutex::new(HashMap::new()),
         said: Mutex::new(String::new()),
+        pool: serve::Pool::new(slots.max(2) as usize, machine.ram_gb),
     });
     info!(
         "AMSYOS Node {} — node {} of {}, a {}, {} slot(s), jobs in {}, Gateway {}",
@@ -358,6 +377,7 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         wait_signal().await;
         let _ = stop_tx.send(true);
     });
+    tokio::spawn(serve::reap(ctx.pool.clone(), ctx.node_dir.clone(), stop.clone()));
 
     let mut backoff = 1u64;
     let mut pending: Option<String> = None;
@@ -370,6 +390,7 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
             End::Replaced => {
                 warn!("a newer connection of this node took over (4409): this one stops");
                 ctx.stop_all();
+                serve::stop_all(&ctx.pool).await;
                 return Ok(0);
             }
             End::JoinAgain(code) => {
@@ -401,7 +422,21 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    serve::stop_all(&ctx.pool).await;
     Ok(0)
+}
+
+fn setup_hint() -> &'static str {
+    if cfg!(windows) { "amsyos-node setup (in an administrator window)" } else { "sudo amsyos-node setup" }
+}
+
+/// Whether the `amsyos-job` copy jobs run is this very program (`setup` copies it).
+fn same_program() -> bool {
+    let read = |p: &Path| std::fs::read(p).ok();
+    match (std::env::current_exe().ok().as_deref().and_then(read), read(&config::job_bin())) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -729,6 +764,9 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
         problems.push(format!("put: a link of the Gateway {} ending in /", base(&ctx.gateway)));
     }
     let limits = Limits::parse(v.get("limits"), &mut problems);
+    // Node 2.1.2: who may share a warm server (serve.rs); anything else is no key at all, and
+    // the job gets a server of its own. TODO(review): isolation.
+    let serve_key = v.get("serve_key").and_then(Value::as_str).filter(|k| serve::is_kernel_key(k)).map(String::from);
     if !problems.is_empty() {
         let hint = format!("the node refused the job: {}", problems.join("; "));
         warn!("job {id}: {hint}");
@@ -764,7 +802,7 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
         taken.insert("as_node".into(), true.into()); // the kernel logs it (node.list)
     }
     ctx.send(Value::Object(taken));
-    let job = JobMsg { id: id.to_string(), service, version, params, inputs, outputs, put, limits, exec, as_node, folders };
+    let job = JobMsg { id: id.to_string(), service, version, params, inputs, outputs, put, limits, exec, as_node, folders, serve_key };
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let id = job.id.clone();
@@ -875,7 +913,22 @@ async fn do_job(ctx: &Arc<Ctx>, job: &JobMsg, svc: &Service, cancel: watch::Rece
     if let Some(None) = job.exec {
         svc.dir = jd.dir.clone(); // node.exec without a cwd runs in the job's folder
     }
-    let ended = match exec::execute(&jd, &svc, &job.limits, ctx.server, &ctx.node_dir, job.as_node, cancel.clone(), progress).await {
+    let ran = if job.exec.is_none() && svc.served().is_some() {
+        // Node 2.1.2: through a server kept warm (serve.rs).
+        let key = serve::key(&job.service, &job.version, job.as_node, job.serve_key.as_deref(), &svc, &job.limits);
+        serve::execute(
+            &ctx.pool, key, &jd, id, &svc, &job.service, &job.limits, ctx.server, &ctx.node_dir, &ctx.jobs_root,
+            job.as_node, cancel.clone(), progress,
+        )
+        .await
+        .map(|(ended, how)| {
+            info!("job {id}: served ({how})");
+            ended
+        })
+    } else {
+        exec::execute(&jd, &svc, &job.limits, ctx.server, &ctx.node_dir, job.as_node, cancel.clone(), progress).await
+    };
+    let ended = match ran {
         Ok(e) => e,
         Err(e) => {
             cleanup(jd).await;
@@ -1082,10 +1135,14 @@ async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<St
     if as_node && level < Access::Full {
         return Err(format!("as_node needs the access level full at this machine (it is {})", level.as_str()));
     }
-    let command = v.get("command").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    if command.is_empty() || command.len() > 2000 || command.chars().any(char::is_control) {
-        return Err("command: one line, at most 2000 characters".into());
+    // Node 2.1.2: `serve`, a server kept warm (serve.rs), beside or instead of `command`.
+    let line = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let (command, serve) = (line("command"), line("serve"));
+    let bad = |c: &String| c.len() > 2000 || c.chars().any(char::is_control);
+    if (command.is_empty() && serve.is_empty()) || bad(&command) || bad(&serve) {
+        return Err("command or serve (or both): each one line, at most 2000 characters".into());
     }
+    let serve = (!serve.is_empty()).then_some(serve);
     let package = v.get("package").cloned().unwrap_or(Value::Null);
     let url = package
         .get("url")
@@ -1136,9 +1193,11 @@ async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<St
         let _ = std::fs::remove_dir_all(&folder);
         return Err(format!("the unpacked folder could not be protected: {e}"));
     }
+    let served = serve.is_some();
     let entry = Service {
         dir: folder.clone(),
         command,
+        serve,
         gpu: false,
         on: true,
         managed: true,
@@ -1153,9 +1212,10 @@ async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<St
             warn!("the earlier folder of {service}, {}, could not be removed: {e}", old.dir.display());
         }
     }
-    info!("deploy of {service} by {by}: {files} files, {bytes} bytes (package {size} bytes, sha256 {sha}) in {}{}",
-          folder.display(), if as_node { ", as_node" } else { "" });
-    Ok(format!("{service} is on, from {files} files in {}", folder.display()))
+    info!("deploy of {service} by {by}: {files} files, {bytes} bytes (package {size} bytes, sha256 {sha}) in {}{}{}",
+          folder.display(), if as_node { ", as_node" } else { "" }, if served { ", served warm" } else { "" });
+    Ok(format!("{service} is on, from {files} files in {}{}", folder.display(),
+               if served { "; its jobs go through a server kept warm (serve)" } else { "" }))
 }
 
 /// GET a package into the node's own folder, at most `most` bytes, and its SHA-256.

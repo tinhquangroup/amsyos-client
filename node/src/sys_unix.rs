@@ -306,35 +306,84 @@ pub struct Spawned {
     pub proc: Arc<Proc>,
     pub stdout: Box<dyn io::Read + Send>,
     pub stderr: Box<dyn io::Read + Send>,
+    /// A server kept warm (`Launch::serve_state`): the node's end of its stdin.
+    pub stdin: Option<File>,
+}
+
+/// The node's end of a server's stdin, if the process was started with one.
+fn stdin_of(child: &mut Child) -> Option<File> {
+    child.stdin.take().map(|s| File::from(std::os::fd::OwnedFd::from(s)))
+}
+
+/// TODO(review): isolation — a pipe of a server kept warm as the job account: `amsyos-job next`
+/// and `done`, run by any child of the server, open it again through /proc/<pid>/fd, which
+/// takes the pipe's own mode; a pipe the node's user makes is its own, 0600. It is given to
+/// the group amsyos-job, 0660 (0666 when the node's session is not in that group yet: /proc
+/// still lets only that account's processes, the node's user and root reach it). (read, write)
+fn job_pipe() -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), String> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!("cannot make a pipe: {}", io::Error::last_os_error()));
+    }
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    let shared = group_id(JOB_USER).is_some_and(|g| unsafe { libc::fchown(r.as_raw_fd(), libc::uid_t::MAX, g) } == 0);
+    unsafe {
+        libc::fchmod(r.as_raw_fd(), if shared { 0o660 } else { 0o666 });
+    }
+    Ok((r, w))
+}
+
+/// What of the lines the node wrote to a server's stdin it has not read yet (FIONREAD, which
+/// a pipe answers at either end): whether a server that ended had taken its job.
+pub fn unread(stdin: &File) -> Option<usize> {
+    use std::os::fd::AsRawFd;
+    let mut n: libc::c_int = 0;
+    let r = unsafe { libc::ioctl(stdin.as_raw_fd(), libc::FIONREAD, &mut n) };
+    (r == 0).then_some(n.max(0) as usize)
 }
 
 /// TODO(review): isolation — `node.exec` and an `as_node` service's direct job at `full`:
 /// the node's own account, `sh -c` in its own process group (killed whole at the timeout,
-/// a cancel or its end), the node's environment with the job's folder, no memory cap.
+/// a cancel or its end), the node's environment with the job's folder, no memory cap. A
+/// server kept warm (node 2.1.2) the same way, its stdin the node's pipe of jobs, told the
+/// pid of its shell, which holds that pipe while it lives.
 fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
     use std::os::unix::process::CommandExt;
     let job = l.job_dir.to_string_lossy().into_owned();
     let path = std::env::var("PATH").unwrap_or_else(|_| SYS_PATH.to_string());
+    let inherited = std::env::var("PYTHONPATH").ok();
     let mut cmd = Command::new("/bin/sh");
     cmd.arg("-c")
-        .arg(&l.command)
         .current_dir(&l.service_dir)
-        .env("AMSYOS_JOB", &job)
         .env("TMPDIR", format!("{job}/tmp"))
         .env("PATH", format!("{}:{path}", config::bin_dir().display()))
-        .stdin(Stdio::null())
+        .env("PYTHONPATH", crate::pymod::pythonpath(inherited.as_deref()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    match &l.serve_state {
+        Some(state) => {
+            cmd.arg(format!("AMSYOS_SERVE_PID=$$; export AMSYOS_SERVE_PID; {}", l.command))
+                .env_remove("AMSYOS_JOB")
+                .env("AMSYOS_SERVE_STATE", state)
+                .stdin(Stdio::piped());
+        }
+        None => {
+            cmd.arg(&l.command).env("AMSYOS_JOB", &job).stdin(Stdio::null());
+        }
+    }
     let mut child = cmd.spawn().map_err(|e| format!("cannot start /bin/sh in {}: {e}", l.service_dir.display()))?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take().ok_or("no stderr")?;
+    let stdin = stdin_of(&mut child);
     let pid = child.id();
     Ok(Spawned {
         pid,
         proc: Arc::new(Proc { child: Mutex::new(Some(child)), pid: pid as i32, done: Arc::new(AtomicBool::new(false)), own_group: true }),
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
+        stdin,
     })
 }
 
@@ -346,7 +395,13 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     let wrapper = config::job_bin().to_string_lossy().into_owned();
     let bin = config::bin_dir().to_string_lossy().into_owned();
     let mem = (l.ram_gb.max(0.1) * (1u64 << 30) as f64) as u64;
-    let cpu_s = l.max_runtime_s.saturating_mul(l.cpu.ceil().max(1.0) as u64).saturating_add(10);
+    // A server kept warm lives for many jobs: the node holds each to its time (serve.rs), so
+    // no CPU-time limit adds up over them.
+    let cpu_s = if l.serve_state.is_some() {
+        0
+    } else {
+        l.max_runtime_s.saturating_mul(l.cpu.ceil().max(1.0) as u64).saturating_add(10)
+    };
     let scoped = cgroups_ok();
     let mut cmd = if scoped {
         let mut c = Command::new("systemd-run");
@@ -365,23 +420,44 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     let mem_bytes = if scoped { "0".to_string() } else { mem.to_string() };
     cmd.args(["-n", "-u", JOB_USER, "--", &wrapper, "launch"])
         .args(["--job", &job, "--dir", &dir, "--bin", &bin, "--nice", nice])
-        .args(["--mem", &mem_bytes, "--cpu-s", &cpu_s.to_string(), "--", &l.command]);
+        .args(["--mem", &mem_bytes, "--cpu-s", &cpu_s.to_string()]);
+    if let Some(state) = &l.serve_state {
+        cmd.args(["--serve", &state.to_string_lossy()]);
+    }
+    cmd.args(["--", &l.command]);
     cmd.env_clear().env("PATH", SYS_PATH);
     for keep in ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
         if let Some(v) = std::env::var_os(keep) {
             cmd.env(keep, v);
         }
     }
-    cmd.current_dir("/").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start sudo: {e}"))?;
-    let stdout = child.stdout.take().ok_or("no stdout")?;
+    cmd.current_dir("/").stderr(Stdio::piped());
+    // A server's stdin and stdout are pipes its children reach again through /proc (job_pipe).
+    let (mut stdin, mut served_out) = (None, None);
+    if l.serve_state.is_some() {
+        let (in_r, in_w) = job_pipe()?;
+        let (out_r, out_w) = job_pipe()?;
+        cmd.stdin(Stdio::from(in_r)).stdout(Stdio::from(out_w));
+        stdin = Some(File::from(in_w));
+        served_out = Some(File::from(out_r));
+    } else {
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped());
+    }
+    let spawned = cmd.spawn().map_err(|e| format!("cannot start sudo: {e}"));
+    drop(cmd); // the server's own ends, closed here
+    let mut child = spawned?;
+    let stdout: Box<dyn io::Read + Send> = match served_out {
+        Some(f) => Box::new(f),
+        None => Box::new(child.stdout.take().ok_or("no stdout")?),
+    };
     let stderr = child.stderr.take().ok_or("no stderr")?;
     let pid = child.id();
     Ok(Spawned {
         pid,
         proc: Arc::new(Proc { child: Mutex::new(Some(child)), pid: pid as i32, done: Arc::new(AtomicBool::new(false)), own_group: false }),
-        stdout: Box::new(stdout),
+        stdout,
         stderr: Box::new(stderr),
+        stdin,
     })
 }
 

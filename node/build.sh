@@ -5,12 +5,23 @@
 #   node/build.sh            both targets
 #   node/build.sh linux      one of them (linux | windows)
 #   node/build.sh shell      a shell in the build image, the crate at /src
+# The Python job module (sdk/amsyos/__init__.py) is built into the program (src/pymod.rs):
+# it is copied into py/ first, since only node/ is mounted in Docker.
 set -euo pipefail
 
 RUST_IMAGE="rust:1.99.0-bookworm"           # rustc 1.99.0 (2026-09-28)
 BUILD_IMAGE="amsyos-node-build:1.99.0"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WHAT="${1:-all}"
+
+MODULE="$HERE/../sdk/amsyos/__init__.py"
+if [ -f "$MODULE" ]; then
+  mkdir -p "$HERE/py/amsyos"
+  cmp -s "$MODULE" "$HERE/py/amsyos/__init__.py" || cp "$MODULE" "$HERE/py/amsyos/__init__.py"
+elif [ ! -f "$HERE/py/amsyos/__init__.py" ]; then
+  echo "the Python job module is missing: neither $MODULE nor py/amsyos/__init__.py" >&2
+  exit 1
+fi
 
 if ! docker image inspect "$BUILD_IMAGE" >/dev/null 2>&1; then
   docker build -t "$BUILD_IMAGE" - <<EOF

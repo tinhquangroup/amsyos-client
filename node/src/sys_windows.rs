@@ -476,6 +476,37 @@ pub struct Spawned {
     pub proc: Arc<Proc>,
     pub stdout: Box<dyn io::Read + Send>,
     pub stderr: Box<dyn io::Read + Send>,
+    /// A server kept warm (`Launch::serve_state`): the node's end of its stdin.
+    pub stdin: Option<File>,
+}
+
+/// An anonymous pipe cannot be asked from its writing end what is unread: a server that ended
+/// after its job's line was written is taken to have had the job (serve.rs).
+pub fn unread(_stdin: &File) -> Option<usize> {
+    None
+}
+
+/// A server's stdin (node 2.1.2): the process's end inheritable, the node's end not; or NUL,
+/// as for any other job. (the process's end, the node's end or null)
+fn stdin_for(l: &Launch, sa: &SECURITY_ATTRIBUTES) -> Result<(HANDLE, HANDLE), String> {
+    if l.serve_state.is_none() {
+        let nul_name = wide("NUL");
+        let nul = unsafe {
+            CreateFileW(nul_name.as_ptr(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, sa, OPEN_EXISTING, 0, null_mut())
+        };
+        return Ok((nul, null_mut()));
+    }
+    let (mut r, mut w): (HANDLE, HANDLE) = (null_mut(), null_mut());
+    if unsafe { CreatePipe(&mut r, &mut w, sa, 0) } == 0 {
+        return Err(format!("cannot make a pipe: {}", last_error()));
+    }
+    unsafe { SetHandleInformation(w, HANDLE_FLAG_INHERIT, 0) }; // the node's end stays its own
+    Ok((r, w))
+}
+
+/// The node's end of a server's stdin as a file (None for any other job).
+fn stdin_file(w: HANDLE) -> Option<File> {
+    (!w.is_null()).then(|| unsafe { File::from_raw_handle(w as _) })
 }
 
 /// The machine's PATH (HKLM), not the person's own.
@@ -538,15 +569,25 @@ fn env_block(l: &Launch) -> Vec<u16> {
 
 /// TODO(review): isolation — what contract 1 adds to the job account's own environment,
 /// as `set "NAME=value"&& ` commands cmd runs before the service's command: the job's
-/// folder, its temporary folder, and amsyos-job.exe first on its PATH. A value cmd would
-/// read as more than text is refused.
+/// folder, its temporary folder, amsyos-job.exe first on its PATH and the Python job module
+/// on its PYTHONPATH (node 2.1.2; after the node's own PYTHONPATH for a job run as the node's
+/// account, which inherits the node's environment). A server kept warm is told where
+/// `amsyos-job next` keeps the job now instead of a job's folder. A value cmd would read as
+/// more than text is refused.
 fn job_vars(l: &Launch) -> Result<String, String> {
     let job = l.job_dir.display().to_string();
+    let clean = |v: &str| !v.chars().any(|c| matches!(c, '"' | '%' | '&' | '|' | '<' | '>' | '^' | '\n' | '\r'));
+    let inherited = if l.as_node { env("PYTHONPATH").filter(|p| clean(p)) } else { None };
+    let given = match &l.serve_state {
+        Some(state) => ("AMSYOS_SERVE_STATE", state.display().to_string()),
+        None => ("AMSYOS_JOB", job.clone()),
+    };
     let vars = [
-        ("AMSYOS_JOB", job.clone()),
+        given,
         ("TEMP", format!(r"{job}\tmp")),
         ("TMP", format!(r"{job}\tmp")),
         ("PATH", format!("{};%PATH%", config::bin_dir().display())),
+        ("PYTHONPATH", crate::pymod::pythonpath(inherited.as_deref())),
     ];
     let mut out = String::new();
     for (k, v) in vars {
@@ -593,12 +634,10 @@ fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
         lpSecurityDescriptor: null_mut(),
         bInheritHandle: 1,
     };
+    let prefix = job_vars(l)?;
     let (out_r, out_w) = pipe(&sa)?;
     let (err_r, err_w) = pipe(&sa)?;
-    let nul_name = wide("NUL");
-    let nul = unsafe {
-        CreateFileW(nul_name.as_ptr(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, null_mut())
-    };
+    let (nul, in_w) = stdin_for(l, &sa)?;
     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -608,7 +647,6 @@ fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
     si.hStdError = err_w;
     let cmd_exe = system_root().join(r"System32\cmd.exe");
     let app = wide(&cmd_exe);
-    let prefix = job_vars(l)?;
     let mut line: Vec<u16> = OsStr::new(&format!("\"{}\" /d /s /c \"{prefix}{}\"", cmd_exe.display(), l.command))
         .encode_wide()
         .chain(Some(0))
@@ -641,11 +679,15 @@ fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
         unsafe {
             CloseHandle(out_r);
             CloseHandle(err_r);
+            if !in_w.is_null() {
+                CloseHandle(in_w);
+            }
         }
         return Err(format!("cannot start cmd.exe in {}: {e}", l.service_dir.display()));
     }
     let stdout = unsafe { File::from_raw_handle(out_r as _) };
     let stderr = unsafe { File::from_raw_handle(err_r as _) };
+    let stdin = stdin_file(in_w);
     let fail = |why: String| -> Result<Spawned, String> {
         unsafe {
             TerminateProcess(pi.hProcess, 1);
@@ -677,6 +719,7 @@ fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
         proc: Arc::new(Proc { process: pi.hProcess, job }),
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
+        stdin,
     })
 }
 
@@ -700,12 +743,20 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
         lpSecurityDescriptor: null_mut(),
         bInheritHandle: 1,
     };
+    // The job's environment is its own account's (lpEnvironment NULL: the secondary logon
+    // service builds it from the job account's profile; an explicit block was refused with
+    // error 87 on Windows 10, tried on PC2 2026-11-18). Nothing of the node's is in it.
+    // What contract 1 adds is set by cmd itself before the command runs.
+    let prefix = match job_vars(l) {
+        Ok(p) => p,
+        Err(e) => {
+            password.iter_mut().for_each(|c| *c = 0);
+            return Err(e);
+        }
+    };
     let (out_r, out_w) = pipe(&sa)?;
     let (err_r, err_w) = pipe(&sa)?;
-    let nul_name = wide("NUL");
-    let nul = unsafe {
-        CreateFileW(nul_name.as_ptr(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, null_mut())
-    };
+    let (nul, in_w) = stdin_for(l, &sa)?;
     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -716,11 +767,6 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
 
     let cmd_exe = system_root().join(r"System32\cmd.exe");
     let app = wide(&cmd_exe);
-    // The job's environment is its own account's (lpEnvironment NULL: the secondary logon
-    // service builds it from the job account's profile; an explicit block was refused with
-    // error 87 on Windows 10, tried on PC2 2026-11-18). Nothing of the node's is in it.
-    // What contract 1 adds is set by cmd itself before the command runs.
-    let prefix = job_vars(l)?;
     let line: Vec<u16> = OsStr::new(&format!("\"{}\" /d /s /c \"{prefix}{}\"", cmd_exe.display(), l.command))
         .encode_wide()
         .chain(Some(0))
@@ -736,6 +782,9 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
             CloseHandle(err_w);
             if nul != INVALID_HANDLE_VALUE {
                 CloseHandle(nul);
+            }
+            if !in_w.is_null() {
+                CloseHandle(in_w);
             }
         }
         return Err(format!(
@@ -781,11 +830,15 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
         unsafe {
             CloseHandle(out_r);
             CloseHandle(err_r);
+            if !in_w.is_null() {
+                CloseHandle(in_w);
+            }
         }
         return Err(format!("cannot start the job as {JOB_USER} in {}: {e}", l.service_dir.display()));
     }
     let stdout = unsafe { File::from_raw_handle(out_r as _) };
     let stderr = unsafe { File::from_raw_handle(err_r as _) };
+    let stdin = stdin_file(in_w);
     let fail = |why: String| -> Result<Spawned, String> {
         unsafe {
             TerminateProcess(pi.hProcess, 1);
@@ -852,6 +905,7 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
         proc: Arc::new(Proc { process: pi.hProcess, job }),
         stdout: Box::new(stdout),
         stderr: Box::new(stderr),
+        stdin,
     })
 }
 
@@ -1018,7 +1072,7 @@ pub fn diag(service_dir: Option<PathBuf>) -> Result<i32, String> {
     let fake = Launch {
         job_dir: dir.clone(), service_dir: dir.clone(), command: String::new(), cpu: 1.0,
         ram_gb: 1.0, max_runtime_s: 10, server: true, node_dir: config::node_dir(),
-        as_node: false,
+        as_node: false, serve_state: None,
     };
     let block = env_block(&fake);
     let desk = wide(r"winsta0\default");

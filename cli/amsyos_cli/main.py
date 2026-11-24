@@ -23,7 +23,7 @@ from amsyos_cli import machine as machines
 from amsyos_cli import patch as patches
 from amsyos_cli import setup as setups
 from amsyos_cli import update as updates
-from amsyos_cli.api import TERMINAL, Api, done, idempotency_key, refused_field
+from amsyos_cli.api import TERMINAL, Api, done, held_up, idempotency_key, refused_field
 from amsyos_cli.common import (
     CliError,
     Credentials,
@@ -41,7 +41,7 @@ from amsyos_cli.common import (
     session_ending,
     short,
 )
-from amsyos_cli.deploy import check_of, deploy, dry_run, tenant_of
+from amsyos_cli.deploy import DEPLOY_NODE_HELP, check_of, deploy, dry_run, tenant_of
 from amsyos_cli.feedback import add_parser as add_feedback
 from amsyos_cli.feedback import logout_line
 from amsyos_cli.files import (
@@ -400,7 +400,7 @@ async def cmd_wait(args: argparse.Namespace, out: Out) -> int:
 
         async def stop(status: dict[str, Any]) -> bool:
             nonlocal me
-            if status.get("state") in TERMINAL:
+            if status.get("state") in TERMINAL or held_up(status):
                 return True
             if not done(status):  # running, or an order that runs to its end by itself
                 return False
@@ -1318,7 +1318,7 @@ async def cmd_deploy(args: argparse.Namespace, out: Out) -> int:
         try:
             creds = credentials()
             async with Api(creds, out) as api:
-                return await dry_run(api, out, root, args.channel, args.hours)
+                return await dry_run(api, out, root, args.channel, args.hours, node=args.node)
         except CliError as exc:
             if exc.code.startswith("INVALID") or exc.code in {"NO_CARD", "CREDENTIALS_FILE"}:
                 raise
@@ -1329,7 +1329,7 @@ async def cmd_deploy(args: argparse.Namespace, out: Out) -> int:
         return await deploy(
             api, out, creds, root,
             hours=args.hours, idle_minutes=args.idle_minutes or None, close=args.close,
-            gpu=args.gpu, force=args.force, channel=args.channel,
+            gpu=args.gpu, force=args.force, channel=args.channel, node=args.node,
         )  # fmt: skip
 
 
@@ -1893,8 +1893,10 @@ def parser() -> Parser:
 
     p = add(
         "deploy", cmd_deploy,
-        "build this repository on the organisation's rented node and define it",
-        epilog=cards.PACK_RULES, formatter_class=argparse.RawDescriptionHelpFormatter,
+        "build this repository on the organisation's rented node, or its own node (the card's "
+        "where: node), and define it",
+        epilog=cards.PACK_RULES + DEPLOY_NODE_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )  # fmt: skip
     p.add_argument(
         "--hours", type=float, default=1.0,
@@ -1907,6 +1909,11 @@ def parser() -> Parser:
         help="a node rented here closes after this many idle minutes (0: never)",
     )
     p.add_argument("--gpu", help="any, rtx, or a GPU name node.show lists")
+    p.add_argument(
+        "--node", metavar="n_…",
+        help="where: node: the own node to build on, its id or name (amsyos node list), when "
+        "the organisation has several",
+    )  # fmt: skip
     p.add_argument("--close", action="store_true", help="give the rented node back after")
     p.add_argument("--force", action="store_true", help="build even when nothing changed")
     p.add_argument(
@@ -2114,6 +2121,10 @@ def parser() -> Parser:
             "--idle-minutes", type=int, help="close it after this many idle minutes (2 to 1440)"
         )
         so.add_argument("--gpu", help="any (default), rtx, or a GPU name node show --json lists")
+        so.add_argument(
+            "--no-wait", action="store_true",
+            help="answer at once; by default it waits until the node is up (about a minute)",
+        )  # fmt: skip
         ss = verbs.add_parser(
             "show", parents=[common],
             help="a node in full: the rented one (default: up or not, time left, charged) or an "

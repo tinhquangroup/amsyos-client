@@ -11,10 +11,14 @@ credit; the kernel holds and charges them (`node.rent`, `node.extend`), the CLI 
 from __future__ import annotations
 
 import argparse
+import asyncio
 from typing import Any
 
-from amsyos_cli.api import Api, idempotency_key
+from amsyos_cli.api import Api, held_up, idempotency_key
 from amsyos_cli.common import CliError, Out, amount, credentials, obj, seq, short
+from amsyos_cli.jobs import follow, status_lines
+
+RENT_WAIT_S = 900.0  # `node rent` waits this long at most for the node to be up
 
 
 def _clock(stamp: Any) -> str:
@@ -46,7 +50,8 @@ def show_line(told: dict[str, Any]) -> str:
             )
         )  # fmt: skip
         return f"no rented node up{was}; {how}"
-    bits = [f"rented node {space.get('state', '?')}: {space.get('job')}"]
+    state = "up" if space.get("state") == "open" else space.get("state", "?")
+    bits = [f"rented node {state}: {space.get('job')}"]
     if space.get("note"):
         return f"{bits[0]} ({short(space['note'], 200)})"
     if space.get("class") == "CPU":
@@ -230,14 +235,37 @@ async def cmd_node(args: argparse.Namespace, out: Out) -> int:
                 params["gpu"] = args.gpu
             key = idempotency_key("node.rent", params, creds)
             started = await api.run("node.rent", params, key=key)
+            job = str(started.get("job_id"))
             idle = f", closes after {args.idle_minutes} idle min" if args.idle_minutes else ""
-            out.emit(
-                started,
-                f"rented node starting: {started.get('job_id')} for {args.hours:g} h{idle}, est. "
-                f"cost {amount(started.get('est_cost'))}; amsyos node show says when it is up "
-                "(about a minute), a build waits for it",
+            line = (
+                f"rented node starting: {job} for {args.hours:g} h{idle}, est. cost "
+                f"{amount(started.get('est_cost'))}"
             )
-            return 0
+            if getattr(args, "no_wait", False):
+                out.emit(
+                    started, f"{line}; amsyos node show says when it is up (about a minute). "
+                    "Its job holds the node and never ends while it is up: do not wait for it",
+                )  # fmt: skip
+                return 0
+            out.note(f"{line}; waiting until it is up (about a minute)")
+            # Its hold runs as long as the node is up: waited for until up, not to its end.
+            try:
+                status = await asyncio.wait_for(follow(api, out, job), RENT_WAIT_S)
+            except TimeoutError:
+                out.emit(
+                    started, f"rented node not up after {RENT_WAIT_S / 60:g} min: amsyos node "
+                    f"show says its state; amsyos node close {job} gives it back",
+                )  # fmt: skip
+                return 3
+            if held_up(status):
+                told = await api.instant("node.show")
+                out.emit(
+                    {**status, "node": told},
+                    show_line(told) + "; its job holds it until amsyos node close or its hours end",
+                )
+                return 0
+            out.emit(status, *status_lines(status))
+            return 1
         if what == "clean":
             return await _clean(api, args, out)
         if what == "close":

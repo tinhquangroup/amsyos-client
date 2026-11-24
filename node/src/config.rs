@@ -129,6 +129,13 @@ pub fn job_bin() -> PathBuf {
     bin_dir().join(if cfg!(windows) { "amsyos-job.exe" } else { "amsyos-job" })
 }
 
+/// Node 2.1.2: the folder on every job's PYTHONPATH that holds the Python job module
+/// (`from amsyos import job, serve`, sdk/amsyos), inside `bin`: the job account may read it,
+/// never write. `setup` writes it, and `run` when it can (pymod.rs).
+pub fn python_dir() -> PathBuf {
+    bin_dir().join("python")
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -236,7 +243,14 @@ fn is_false(b: &bool) -> bool {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Service {
     pub dir: PathBuf,
+    /// Started once a job; empty for a service that has only `serve`.
+    #[serde(default)]
     pub command: String,
+    /// Node 2.1.2: a server kept warm (sdk/CONTRACT.md §3), started once and handed the jobs
+    /// one after the other on its stdin (serve.rs). With `command` beside it, a job its
+    /// server could not take runs as `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serve: Option<String>,
     #[serde(default)]
     pub gpu: bool,
     /// Only a service that is on is offered (`switch` turns it off and on).
@@ -259,7 +273,21 @@ pub struct Service {
 
 impl Service {
     pub fn new(dir: PathBuf, command: String, gpu: bool) -> Service {
-        Service { dir, command, gpu, on: true, managed: false, by: None, sha256: None, as_node: false, as_job: false }
+        Service { dir, command, serve: None, gpu, on: true, managed: false, by: None, sha256: None, as_node: false, as_job: false }
+    }
+
+    /// The server's command, when the service has one.
+    pub fn served(&self) -> Option<&str> {
+        self.serve.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// How it runs, as a person reads it: its command, its server, or both.
+    pub fn shown(&self) -> String {
+        match (self.command.trim(), self.served()) {
+            ("", Some(s)) => format!("serve: {s}"),
+            (c, Some(s)) => format!("serve: {s}; command: {c}"),
+            (c, None) => c.to_string(),
+        }
     }
 
     /// TODO(review): isolation — whether this service's job may run as the node's own account:

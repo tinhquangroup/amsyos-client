@@ -19,8 +19,9 @@ What the space does (services/space/machine/space_run.py, sdk/CONTRACT.md §3), 
   gets, amsyos_cli/sdk), `amsyos-job` on PATH, TMPDIR in the job's folder, the cores. No
   AMSYOS key or token: AMSYOS_* and every variable named like a key or token are left out;
 - its end read as the space reads it (error.json, the exit code, out/), then what the
-  check of a version does (kernel/checks.py, contract 1 §5): every declared output there,
-  not empty, its first bytes its format; then the card's tests that read a JSON output.
+  check of a version does (kernel/checks.py, contract 1 §5): every declared output there
+  (but one that says `optional: true`), not empty, its first bytes its format; then the
+  card's tests that read a JSON output.
   A test with a `check` service runs on AMSYOS only (deploy runs it).
 
 The format check and the tests' rules are kernel/conform.py `sniff` and kernel/checks.py
@@ -701,10 +702,17 @@ def _misfit(path: Path, fmt: str) -> str | None:
 
 
 def _judge(
-    job: Path, ran: Ran, declared: dict[str, str], log: Path, code_dir: Path | None
+    job: Path,
+    ran: Ran,
+    declared: dict[str, str],
+    log: Path,
+    code_dir: Path | None,
+    *,
+    optional: set[str] | None = None,
 ) -> Judged:
     """The job's end as the space reads it (space_run.py `take_back`), then what the check
-    of a version finds wrong with its outputs (kernel/checks.py `_judge`)."""
+    of a version finds wrong with its outputs (kernel/checks.py `_judge`): an `optional`
+    output may be missing."""
     told = Judged()
     out = job / "out"
     for path in sorted(out.iterdir()) if out.is_dir() else []:
@@ -759,6 +767,8 @@ def _judge(
     there = ", ".join(str(f["file"])[4:] for f in told.files) or "nothing"
     for name, fmt in declared.items():
         path = told.made.get(name)
+        if path is None and name in (optional or set()):
+            continue
         if path is None:
             told.problems.append(
                 f"outputs.{name}: no such file; write out/{name}.{fmt} "
@@ -900,7 +910,10 @@ def run_here(
         except OSError as exc:
             ran = 127, f"the command could not be started: {exc}"
         seconds = time.monotonic() - began
-        judged = _judge(job, ran, declared, log, code_dir if code_dir != root else None)
+        judged = _judge(
+            job, ran, declared, log, code_dir if code_dir != root else None,
+            optional=cards.optional_outputs(card),
+        )  # fmt: skip
         why_not = judged.hint if judged.error else next(iter(judged.problems), None)
         tests = _tests(card, judged.made, why_not)
         passed = judged.error is None and not judged.problems

@@ -18,7 +18,7 @@ overwrites it.
 - One folder per service, `services/<name>/`, with its card `amsyos.yaml`:
   `amsyos init --dir services/<name>` proposes the card from the code there, `amsyos card
   --check --dir services/<name>` checks it (free), `amsyos deploy --dir services/<name>`
-  builds it on the rented node.
+  builds it on the rented node (`where: node` in the card: on an own node, free).
 - The organisation's code runs only on its nodes, never on this machine; `amsyos run
   --local` may try a small piece here when it needs nothing rented.
 - `log.md`: what was built and done (below). `out/<job>/`: outputs, never committed.

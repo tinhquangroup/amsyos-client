@@ -19,6 +19,12 @@
    else `service@version`, the version the bare id still runs (stable) and the promote
    command (a customer's feedback).
 
+With `where: node` (an own node, spec v3 §17; `--node n_…` when the organisation has
+several), steps 4-5 are instead: build the environment and the image on that node by
+`node.exec` (`nodekit/build.py`; the node at `full`, an admin), `node.deploy` the package with
+the command `sh _node/run.sh <image> '<command>'`, then `service.define` with `compute: node`,
+whose check runs the example there. `--dry-run` plans those steps; an own node costs nothing.
+
 Exit 0: defined, its check passed or still running (said with its job); 1: a real failure,
 with its hint. The version is the card's major.minor with the patch counted (one more than
 the newest defined), or the card's major.minor.patch when that is higher. The same files
@@ -34,8 +40,10 @@ import hashlib
 import io
 import json
 import re
+import shlex
 import tarfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -43,9 +51,9 @@ import httpx
 
 from amsyos_cli import card as cards
 from amsyos_cli import repo
-from amsyos_cli.api import Api, idempotency_key
+from amsyos_cli.api import Api, idempotency_key, refused_field
 from amsyos_cli.common import CliError, Credentials, Out, amount, obj, seq, short
-from amsyos_cli.files import human, upload
+from amsyos_cli.files import fetch_text, human, upload
 from amsyos_cli.jobs import check_lines, follow, status_lines
 from amsyos_cli.shell import cli_hint
 
@@ -628,10 +636,20 @@ async def disk_need(
     return told, line
 
 
-async def dry_run(api: Api | None, out: Out, root: Path, channel: str, hours: float = 1.0) -> int:
+async def dry_run(
+    api: Api | None,
+    out: Out,
+    root: Path,
+    channel: str,
+    hours: float = 1.0,
+    *,
+    node: str | None = None,
+) -> int:
     """What deploy would send and make, with nothing sent (read-only calls when logged in)."""
     made = plan(root)
     card = made["card"]
+    if card.get("where", "space") == "node":
+        return await dry_run_node(api, out, root, made, channel, node)
     answer: dict[str, Any] = {
         "dry_run": True, "service": card["service"], "files": made["files"],
         "left_out": made["left_out"],
@@ -682,15 +700,13 @@ async def deploy(
     gpu: str | None,
     force: bool,
     channel: str = "dev",
+    node: str | None = None,
 ) -> int:
     made = plan(root)
     card: dict[str, Any] = made["card"]
     if card.get("where", "space") == "node":
-        raise CliError(
-            "INVALID_CARD",
-            "where: node (an own node) is deployed with node.deploy (later); use where: space "
-            "(your rented node)",
-        )
+        return await deploy_node(api, out, creds, root, made, node=node, force=force,
+                                 channel=channel)  # fmt: skip
     # Always said before anything is sent, not only with --dry-run (v3 T2).
     for line in file_lines(made, every=False):
         out.note(line)
@@ -705,6 +721,7 @@ async def deploy(
         and last.get("fingerprint") == made["fingerprint"]
         and last.get("service") == service_id
         and last.get("version") == current
+        and last.get("node") is None
     ):
         ref, said = run_lines(service_id, current, runs)
         answer = {"service": service_id, "version": current, "changed": False, "run": ref}
@@ -718,24 +735,7 @@ async def deploy(
         raise CliError("FORBIDDEN", said.removeprefix("rented node: "))
 
     # The example's local files, then the source: only what the workspace lacks.
-    example: Any = card.get("example")
-    local = cards.local_files(example)
-    if local:
-        missing = [p for p in local.values() if not (root / p).is_file()]
-        if missing:
-            raise CliError(
-                "INVALID_PARAMS",
-                f"example: no file {', '.join(missing)}; give a sample file's path (from the "
-                f"folder of {cards.CARD})",
-            )
-        sent = await upload(api, [root / p for p in local.values()])
-        for name, row in zip(local, sent, strict=True):
-            how = "already in the workspace" if row.get("reused") else "uploaded"
-            out.note(f"example {name}: {row['asset']} ({how})")
-        card["example"] = {
-            **obj(example),
-            **{k: s["asset"] for k, s in zip(local, sent, strict=True)},
-        }
+    await upload_example(api, out, root, card)
     folder, _ = repo.state_dir(root)
     if state_made:  # said once, by the command that makes it (v3 T2)
         out.note(repo.STATE_NOTE)
@@ -787,6 +787,30 @@ async def deploy(
         _write_state(root, {"fingerprint": made["fingerprint"], **state})
     out.emit(answer, *lines)
     return code
+
+
+async def upload_example(api: Api, out: Out, root: Path, card: dict[str, Any]) -> None:
+    """The example's local files (`@path`) uploaded when the workspace lacks them, and the
+    card's example made to name their assets."""
+    example: Any = card.get("example")
+    local = cards.local_files(example)
+    if not local:
+        return
+    missing = [p for p in local.values() if not (root / p).is_file()]
+    if missing:
+        raise CliError(
+            "INVALID_PARAMS",
+            f"example: no file {', '.join(missing)}; give a sample file's path (from the "
+            f"folder of {cards.CARD})",
+        )
+    sent = await upload(api, [root / p for p in local.values()])
+    for name, row in zip(local, sent, strict=True):
+        how = "already in the workspace" if row.get("reused") else "uploaded"
+        out.note(f"example {name}: {row['asset']} ({how})")
+    card["example"] = {
+        **obj(example),
+        **{k: s["asset"] for k, s in zip(local, sent, strict=True)},
+    }
 
 
 async def _build(  # noqa: PLR0917 - the deploy's state, passed on
@@ -1003,3 +1027,595 @@ async def _close(api: Api, out: Out, answer: dict[str, Any]) -> None:
     out.note(
         "rented node given back: " + (", ".join(f"{k} {v}" for k, v in told.items()) or "done")
     )
+
+
+# ---------------------------------------------------------------- an own node (where: node)
+NODE_KIT = Path(__file__).resolve().parent / "nodekit"  # what runs on the node (package data)
+NODE_MIN = "2.1.2"  # the AMSYOS Node that gives every job the `amsyos` Python module
+NODE_EXEC_S = 3600  # node.exec's longest: the environment, the models and setup
+NODE_COMMAND_MOST = 900  # node.deploy's command
+NODE_DIR = "_node"  # where the package carries the build and the run of an own node
+NODE_EXEC = (
+    f"python3 -m zipfile -e in/file1.zip src && python3 src/{NODE_DIR}/build.py in/file1.zip src"
+)
+NODE_UPDATE = (
+    f"update AMSYOS Node on that machine to {NODE_MIN} or later: stop it, run the new program's "
+    "setup again (Linux: sudo amsyos-node setup, with the same --jobs and --services as "
+    "before), start it again; then amsyos deploy again"
+)
+DEPLOY_NODE_HELP = f"""
+On an own node (the card's where: node; --node n_… when your organisation has several):
+  1. node.exec builds there as the node's own account (the node at full, you an admin): a
+     micromamba environment of the runtime, `system` and `packages` (PyTorch when the code
+     imports torch), the card's `models`, then `setup`; under ~/amsyos-build of that
+     account, one environment for every version with the same packages;
+  2. node.deploy puts the package there with the card's command (and serve);
+  3. service.define with compute: node; its check runs the example on the node.
+A Linux node; free. `from amsyos import job` needs AMSYOS Node {NODE_MIN} or later there.
+"""
+# The conda-forge packages of each runtime, pinned as a rented node pins them.
+NODE_RUNTIMES: dict[str, tuple[str, ...]] = {
+    "python": ("python=3.11", "pip"),
+    "node": ("nodejs=24.22.3",),
+    "java": ("openjdk=21.0.10", "maven=3.9.16"),
+    "go": ("go=1.27.4",),
+    "r": ("r-base=4.5.3", "r-jsonlite=2.0.0"),
+}
+# What a rented node's Python has that code imports without listing it (card.PREINSTALLED):
+# put in an own node's environment when the code imports it and its packages do not name it.
+NODE_BASE = {"numpy": "numpy==2.1.3", "PIL": "pillow==11.3.0", "requests": "requests==2.32.3"}
+NODE_TORCH = {
+    "torch": "torch==2.8.0", "torchvision": "torchvision==0.23.0",
+    "torchaudio": "torchaudio==2.8.0",
+}  # fmt: skip
+TORCH_INDEX = {
+    False: "https://download.pytorch.org/whl/cpu",
+    True: "https://download.pytorch.org/whl/cu128",
+}
+_IMPORT = re.compile(rb"^[ \t]*(?:import|from)[ \t]+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+_PIP_NAME = re.compile(r"[=<>\[ @;!~]")
+
+
+def _listed(value: Any) -> list[str]:
+    """A card's list (`[a, b]`) or text (`a b`)."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    return str(value).split() if isinstance(value, str) else []
+
+
+def _pip_name(requirement: str) -> str:
+    return _PIP_NAME.split(requirement.strip(), maxsplit=1)[0].lower().replace("_", "-")
+
+
+def _imports(root: Path, files: list[str]) -> set[str]:
+    """The top-level modules the code's Python files import."""
+    found: set[str] = set()
+    for rel in [f for f in files if f.endswith(".py")][:_MOST_SCANNED]:
+        try:
+            text = (root / rel).read_bytes()[:400_000]
+        except OSError:
+            continue
+        found |= {m.decode() for m in _IMPORT.findall(text)}
+    return found
+
+
+def node_build(root: Path, made: dict[str, Any], version: str, gpu: bool) -> dict[str, Any]:
+    """`_node/build.json`: what nodekit/build.py makes on the node, from the card. The
+    environment is named by a hash of what is in it, so a version with the same packages
+    takes the one made before."""
+    card: dict[str, Any] = made["card"]
+    files = [str(f["file"]) for f in made["files"]]
+    runtime = str(card.get("runtime", "python"))
+    imports = _imports(root, files) if runtime == "python" else set[str]()
+    packages = _listed(card.get("packages"))
+    named = {_pip_name(p) for p in packages}
+    requirements: str | None = None
+    if not packages and "requirements.txt" in files:  # as on a rented node
+        requirements = "requirements.txt"
+        lines = (root / requirements).read_text(encoding="utf-8", errors="replace").splitlines()
+        named |= {_pip_name(x) for x in lines if x.strip() and x.lstrip()[0] not in "#-"}
+    if runtime == "python":
+        packages += [p for m, p in NODE_BASE.items() if m in imports and _pip_name(p) not in named]
+    torch: dict[str, Any] | None = None
+    if imports & set(NODE_TORCH) and not any(n.startswith("torch") for n in named):
+        torch = {
+            "packages": [p for m, p in NODE_TORCH.items() if m == "torch" or m in imports],
+            "index": TORCH_INDEX[gpu],
+        }
+    models = _listed(card.get("models"))
+    conda = list(NODE_RUNTIMES.get(runtime, NODE_RUNTIMES["python"]))
+    if runtime != "python" and (packages or requirements or models):
+        conda += NODE_RUNTIMES["python"]  # pip and huggingface_hub need a Python
+    conda += _listed(card.get("system"))
+    held = hashlib.sha256((root / requirements).read_bytes()).hexdigest() if requirements else None
+    what = {"conda": conda, "packages": packages, "requirements": held, "torch": torch}
+    key = hashlib.sha256(json.dumps(what, sort_keys=True).encode()).hexdigest()[:12]
+    own_module = "amsyos.py" in files or "amsyos/__init__.py" in files
+    return {
+        "image": cards.image_of(card), "version": version, "env": f"env-{key}", "conda": conda,
+        "packages": packages, "requirements": requirements, "torch": torch, "models": models,
+        "setup": str(card.get("setup") or ""),
+        "needs_module": runtime == "python" and "amsyos" in imports and not own_module,
+        "node_min": NODE_MIN,
+    }  # fmt: skip
+
+
+def node_package(root: Path, made: dict[str, Any], build: dict[str, Any]) -> bytes:
+    """The package of an own node: the files deploy packs, and `_node/` (build.py, run.sh,
+    amsyos-fetch, build.json); a .zip, as node.deploy takes it, the same bytes for the same
+    files. node.exec builds from it, node.deploy unpacks it as the service's folder."""
+    clash = [str(f["file"]) for f in made["files"] if str(f["file"]).split("/")[0] == NODE_DIR]
+    if clash:
+        raise CliError(
+            "INVALID_INPUT",
+            f"{', '.join(clash[:5])}: {NODE_DIR}/ is where deploy puts an own node's build; "
+            "rename that folder",
+        )
+    raw = io.BytesIO()
+    with zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED) as zipped:
+
+        def put(name: str, data: bytes, mode: int) -> None:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = (0o100000 | mode) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zipped.writestr(info, data)
+
+        for row in made["files"]:
+            path = root / str(row["file"])
+            mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+            put(str(row["file"]), path.read_bytes(), mode)
+        put(f"{NODE_DIR}/build.py", (NODE_KIT / "build.py").read_bytes(), 0o755)
+        put(f"{NODE_DIR}/run.sh", (NODE_KIT / "run.sh").read_bytes(), 0o755)
+        put(f"{NODE_DIR}/bin/amsyos-fetch", (NODE_KIT / "fetch.py").read_bytes(), 0o755)
+        put(f"{NODE_DIR}/build.json", json.dumps(build, sort_keys=True, indent=1).encode(), 0o644)
+    package = raw.getvalue()
+    if len(package) > MOST_ARCHIVE_BYTES:
+        raise CliError(
+            "INVALID_INPUT",
+            f"the package is {human(len(package))}: node.deploy takes at most 200 MB; fetch "
+            "large files in `setup` instead (amsyos-fetch)",
+        )
+    return package
+
+
+def node_commands(card: dict[str, Any], image_dir: str) -> dict[str, str]:
+    """node.deploy's `command` (and `serve`): the card's, run by `_node/run.sh` in the
+    image's folder on the node, with its environment."""
+    told: dict[str, str] = {}
+    for key in ("command", "serve"):
+        given = str(card.get(key) or "").strip()
+        if not given:
+            continue
+        told[key] = f"sh {NODE_DIR}/run.sh {shlex.quote(image_dir)} {shlex.quote(given)}"
+        if "\n" in given or len(told[key]) > NODE_COMMAND_MOST:
+            raise CliError(
+                "INVALID_CARD",
+                f"{key}: one line; with the image's folder it is {len(told[key])} characters, "
+                f"node.deploy takes {NODE_COMMAND_MOST}: shorten it, or start a script of the "
+                "folder",
+            )
+    return told
+
+
+def node_line(node: dict[str, Any]) -> str:
+    machine = obj(node.get("machine"))
+    gpus = [str(g) for g in seq(machine.get("gpus"))]
+    bits = [
+        f"{node.get('node')} '{node.get('name') or '?'}'", str(node.get("state") or "?"),
+        f"level {node.get('access') or '?'}", str(machine.get("os") or "os not known"),
+    ]  # fmt: skip
+    if machine.get("cpus"):
+        bits.append(f"{machine['cpus']} CPUs")
+    bits.append(f"GPU {', '.join(gpus[:2])}" if gpus else "no GPU")
+    return ", ".join(bits)
+
+
+def node_problems(
+    node: dict[str, Any], you: dict[str, Any] | None, card: dict[str, Any] | None
+) -> list[str]:
+    """What keeps deploy from building on this node, each with what fixes it: online, a
+    Linux machine at `full` (node.exec), an admin calling, a GPU when the card needs one."""
+    name = f"node {node.get('node')} '{node.get('name') or '?'}'"
+    machine = obj(node.get("machine"))
+    found: list[str] = []
+    if node.get("state") != "online":
+        seen = f" (last seen {node['last_seen']})" if node.get("last_seen") else ""
+        found.append(f"{name} is offline{seen}: start it at that machine (amsyos-node run)")
+    if str(machine.get("os") or "") == "windows":
+        found.append(
+            f"{name} runs Windows: deploy builds on a Linux node only; on Windows, zip the "
+            "service yourself and node.deploy it (amsyos describe node.deploy)"
+        )
+    if node.get("access") != "full":
+        found.append(
+            f"{name} is at the level '{node.get('access') or '?'}': deploy builds there with "
+            "node.exec, which needs 'full'. Only the person at that machine raises it, there: "
+            "sudo amsyos-node access full"
+        )
+    if you is not None and you.get("kind") == "person" and not you.get("admin"):
+        found.append(
+            f"node.exec, which builds there, is for an admin of your organisation (or an agent "
+            f"of one); you ({you.get('id')}) are no admin: an admin runs amsyos deploy"
+        )
+    needs = str(obj((card or {}).get("resources")).get("gpu") or "none")
+    if needs == "required" and not seq(machine.get("gpus")):
+        found.append(f"resources.gpu: required, but {name} has no GPU: --node one with a GPU")
+    return found
+
+
+async def own_node(api: Api, asked: str | None) -> dict[str, Any]:
+    """The own node deploy builds on: `--node` (its id or name), the only one, or the only
+    one ready; `node.list` says them."""
+    told = await api.instant("node.list")
+    own = [obj(n) for n in seq(told.get("nodes")) if str(obj(n).get("node", "")).startswith("n_")]
+    listed = "; ".join(node_line(n) for n in own[:8])
+    ids = {"nodes": [n.get("node") for n in own]}
+    if asked:
+        found = [n for n in own if asked in {n.get("node"), n.get("name")}]
+        if found:
+            return found[0]
+        raise CliError(
+            "INVALID_PARAMS",
+            f"--node: '{asked}' is no own node of your organisation; "
+            + (f"yours: {listed}" if own else "it has none (amsyos run node.join_code)"),
+            ids,
+        )
+    if not own:
+        raise CliError(
+            "INVALID_CARD",
+            "where: node, but your organisation has no own node: a computer of yours joins "
+            "with `amsyos run node.join_code` (the person at it runs the command it gives); or "
+            "where: space in amsyos.yaml builds on a rented node",
+        )
+    ready = [n for n in own if not node_problems(n, None, None)]
+    if len(own) == 1 or len(ready) == 1:
+        return own[0] if len(own) == 1 else ready[0]
+    raise CliError(
+        "INVALID_PARAMS",
+        f"your organisation has {len(own)} own nodes: name one with --node <id>: {listed}",
+        ids,
+    )
+
+
+async def who_calls(api: Api) -> tuple[str, dict[str, Any]]:
+    """(the organisation, `workspace.list`'s `you`)."""
+    you = obj((await api.instant("workspace.list")).get("you"))
+    tenant = you.get("organisation") or (
+        you.get("id") if you.get("kind") == "organisation" else None
+    )
+    if not isinstance(tenant, str):
+        raise CliError("BAD_ANSWER", "workspace.list did not say your organisation")
+    return tenant, you
+
+
+def node_plan_lines(build: dict[str, Any], models_gb: float | None) -> list[str]:
+    """What the build on the node puts in, in words."""
+    bits = [f"conda-forge {' '.join(build['conda'])}"]
+    packages: list[str] = build["packages"]
+    if packages:
+        bits.append(f"pip {' '.join(packages[:8])}" + (" …" if len(packages) > 8 else ""))
+    if build.get("requirements"):
+        bits.append(f"pip -r {build['requirements']}")
+    torch = obj(build.get("torch"))
+    if torch:
+        kind = "CUDA" if str(torch.get("index", "")).endswith("cu128") else "the CPU"
+        bits.append(f"PyTorch for {kind} ({' '.join(map(str, seq(torch.get('packages'))))})")
+    lines = [f"     environment {build['env']}: {'; '.join(bits)}"]
+    models: list[str] = build["models"]
+    if models:
+        size = "" if models_gb is None else f", about {models_gb:.1f} GB"
+        lines.append(f"     models: {len(models)}{size}, into the node's Hugging Face cache")
+    if build.get("setup"):
+        lines.append(f"     setup: {short(str(build['setup']), 200)}")
+    lines.append(
+        "     under ~/amsyos-build of the node's account (AMSYOS_BUILD_HOME there moves it); an "
+        "environment made before for the same packages is taken as it is"
+    )
+    if build.get("needs_module"):
+        lines.append(f"     the code imports amsyos: AMSYOS Node {NODE_MIN} or later gives it")
+    return lines
+
+
+async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
+    api: Api | None,
+    out: Out,
+    root: Path,
+    made: dict[str, Any],
+    channel: str,
+    node: str | None,
+) -> int:
+    """`--dry-run` of `where: node`: the files, the node, the build and the three calls,
+    with nothing sent (read-only calls when logged in). An own node costs nothing."""
+    card: dict[str, Any] = made["card"]
+    answer: dict[str, Any] = {
+        "dry_run": True, "where": "node", "service": card["service"], "files": made["files"],
+        "left_out": made["left_out"], "fingerprint": made["fingerprint"], "channel": channel,
+        "example_files": sorted(cards.local_files(card.get("example")).values()),
+        "cost": 0,
+    }  # fmt: skip
+    chosen: dict[str, Any] | None = None
+    problems: list[str] = []
+    version = cards.full_version(str(card["version"]))
+    head: list[str] = []
+    if api is not None:
+        tenant, you = await who_calls(api)
+        chosen = await own_node(api, node)
+        problems = node_problems(chosen, you, card)
+        service_id = f"{tenant}.{card['service']}"
+        current, _ = await _defined(api, service_id)
+        last = _read_state(root)
+        same = (
+            last.get("fingerprint") == made["fingerprint"]
+            and last.get("version") == current
+            and last.get("node") == chosen.get("node")
+        )
+        answer |= {"service": service_id, "node": chosen.get("node"), "node_ready": not problems}
+        if problems:
+            answer["problems"] = problems
+        head.append(f"own node: {node_line(chosen)}")
+        head += [f"  not ready: {p}" for p in problems]
+        if same:
+            answer["would_make"] = None
+            head.append(f"{service_id}@{current}: nothing changed, nothing would be built")
+        else:
+            version = next_version(str(card["version"]), current)
+            answer["would_make"] = version
+            newest = f"newest now: {current}" if current else "none defined yet"
+            head.append(f"would deploy {service_id}@{version} on it ({newest}), channel {channel}:")
+    gpu = bool(seq(obj((chosen or {}).get("machine")).get("gpus")))
+    build = node_build(root, made, version, gpu)
+    package = node_package(root, made, build)
+    commands = {  # the image's folder is the node's to say
+        k: v.replace("IMAGE_DIR", f"<the folder of {build['image']}@{version}>")
+        for k, v in node_commands(card, "IMAGE_DIR").items()
+    }
+    rows = await model_sizes(build["models"]) if build["models"] else []
+    known = [r["bytes"] for r in rows if r["bytes"] is not None]
+    models_gb = sum(known) / 1e9 if rows and len(known) == len(rows) else None
+    answer |= {"build": build, "package_bytes": len(package), "commands": commands}
+    lines = file_lines({**made, "archive": package}, every=True)
+    if answer["example_files"]:
+        lines.append("example files uploaded too: " + ", ".join(answer["example_files"]))
+    lines += head
+    if api is None:
+        lines.append(f"would deploy {card['service']} on your own node (not logged in: the node "
+                     "and the version are not known):")  # fmt: skip
+    steps = [
+        f"  1. node.exec (an admin; the node at full), with the package as file1: {NODE_EXEC}; "
+        f"up to {NODE_EXEC_S // 60} min",
+        *node_plan_lines(build, models_gb),
+        f"  2. node.deploy the package, command: {commands.get('command') or '(none)'}"
+        + (f"; serve: {commands['serve']}" if commands.get("serve") else ""),
+        f"  3. service.define {card['service']}@{version} with compute: node; its check runs the "
+        "example on the node",
+    ]
+    if answer.get("would_make") is not None or api is None:
+        lines += steps
+    lines += ["cost: none (an own node is free)", "nothing was sent (--dry-run)"]
+    out.emit(answer, *lines)
+    return 0
+
+
+async def deploy_node(
+    api: Api,
+    out: Out,
+    creds: Credentials,
+    root: Path,
+    made: dict[str, Any],
+    *,
+    node: str | None,
+    force: bool,
+    channel: str,
+) -> int:
+    """`where: node`: build on the organisation's own node by node.exec, node.deploy the
+    package there, then service.define with `compute: node`; its check runs there."""
+    card: dict[str, Any] = made["card"]
+    tenant, you = await who_calls(api)
+    chosen = await own_node(api, node)
+    node_id = str(chosen.get("node"))
+    service_id = f"{tenant}.{card['service']}"
+    current, runs = await _defined(api, service_id)
+    last = _read_state(root)
+    if (
+        not force
+        and current is not None
+        and last.get("fingerprint") == made["fingerprint"]
+        and last.get("service") == service_id
+        and last.get("version") == current
+        and last.get("node") == node_id
+    ):
+        ref, said = run_lines(service_id, current, runs)
+        answer = {"service": service_id, "version": current, "changed": False, "run": ref}
+        out.emit(answer, f"{service_id}@{current}: nothing changed (--force builds again)", *said)
+        return 0
+    problems = node_problems(chosen, you, card)
+    if problems:  # before anything is uploaded
+        raise CliError("NODE_NOT_READY", "; ".join(problems), {"node": node_id})
+    version = next_version(str(card["version"]), current)
+    gpu = bool(seq(obj(chosen.get("machine")).get("gpus")))
+    build = node_build(root, made, version, gpu)
+    package = node_package(root, made, build)
+    # A command too long for node.deploy is said before the build: the image's folder as a
+    # long home folder would put it.
+    node_commands(card, f"/home/{'x' * 24}/amsyos-build/images/{build['image']}@{version}")
+    for line in file_lines({**made, "archive": package}, every=False):
+        out.note(line)
+    state_made = not (root / ".amsyos").exists()
+    await upload_example(api, out, root, card)
+    folder, _ = repo.state_dir(root)
+    if state_made:
+        out.note(repo.STATE_NOTE)
+    tmp = folder / f"{build['image']}-{version}.zip"
+    tmp.write_bytes(package)
+    try:
+        row = (await upload(api, [tmp]))[0]
+    finally:
+        tmp.unlink(missing_ok=True)
+    asset = str(row["asset"])
+    how = "already in the workspace" if row.get("reused") else "uploaded"
+    out.note(f"package: {asset} ({how})")
+    answer: dict[str, Any] = {
+        "service": service_id, "version": version, "node": node_id, "channel": channel,
+        "files": made["files"], "left_out": made["left_out"], "package": asset, "cost": 0,
+    }  # fmt: skip
+    if state_made:
+        answer["made"] = ".amsyos/"
+    began = time.monotonic()
+    built, lines = await _node_exec(api, out, creds, node_id, asset, answer)
+    if built is None:
+        out.emit(answer, *lines)
+        return 1
+    commands = node_commands(card, str(built.get("image_dir")))
+    answer["deployed"] = await _node_deploy(api, out, node_id, service_id, asset, commands, built)
+    spec = cards.spec_of(card)
+    spec["compute"] = "node"
+    params: dict[str, Any] = {
+        "name": card["service"], "version": version, "channel": channel,
+        "spec": json.dumps(spec, separators=(",", ":")),
+    }  # fmt: skip
+    source = api.source()
+    if source:
+        params["source"] = json.dumps(source, separators=(",", ":"))
+    answer["defined"] = await api.instant("service.define", params)
+    out.note(f"defined {service_id}@{version} (compute: node)")
+    check = await _check(api, out, service_id, version)
+    answer["check"] = check
+    state = check.get("state") if check else None
+    check_job = check.get("job") if check else None
+    if isinstance(check_job, str):
+        remember_check(root, check_job, f"{service_id}@{version}")
+    took = round(time.monotonic() - began)
+    lines = [
+        f"{service_id}@{version}  on node {node_id} '{chosen.get('name') or '?'}' "
+        f"(build {answer['build_job']}, {took}s in all, cost none)",
+        f"  check: {state or 'none'}" + (f" ({check_job})" if check_job else ""),
+    ]
+    lines += [f"  problem: {short(p, 300)}" for p in seq(obj(check).get("problems"))]
+    lines += check_lines(check, "    ")
+    said = str(obj(check).get("problems") or "") + str(obj(check).get("hint") or "")
+    if "No module named 'amsyos'" in said:
+        lines.append(f"  {NODE_UPDATE}")
+    this = f"{service_id}@{version}"
+    if state == "failed":
+        lines.append(
+            "  the version is defined but its example failed: fix the code or the card, then "
+            f"amsyos deploy; the check's log: amsyos logs {check_job}"
+        )
+        code = 1
+    else:
+        if state == "running":
+            lines.append(f"  check running: amsyos describe {this} says when it ends")
+        ref, run_said = run_lines(service_id, version, stable_of(obj(answer["defined"])))
+        answer["run"] = ref
+        lines += run_said
+        code = 0
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        state_row = {"service": service_id, "version": version, "at": at, "node": node_id}
+        _write_state(root, {"fingerprint": made["fingerprint"], **state_row})
+    out.emit(answer, *lines)
+    return code
+
+
+async def _node_exec(  # noqa: PLR0917 - the deploy's state, passed on
+    api: Api, out: Out, creds: Credentials, node_id: str, asset: str, answer: dict[str, Any]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """The build on the node (node.exec of `_node/build.py`), followed to its end: what it
+    made (`out/build.json`), or None and the lines that say why not."""
+    params = {
+        "node": node_id, "command": NODE_EXEC, "timeout_s": NODE_EXEC_S, "file1": asset,
+        "outputs": "build",
+    }  # fmt: skip
+    began = time.monotonic()
+    started = await api.run(
+        "node.exec", params, key=idempotency_key("node.exec", params, creds), wait_s=50
+    )
+    job_id = str(started["job_id"])
+    answer["build_job"] = job_id
+    out.note(f"building on node {node_id}: {job_id} (environment, models, setup)")
+    status = await follow(api, out, job_id, obj(started.get("status")) or None)
+    took = round(time.monotonic() - began)
+    if status.get("state") != "succeeded":
+        answer["status"] = status
+        return None, [
+            *status_lines(status),
+            f"the build on node {node_id} failed after {took}s: amsyos logs {job_id}",
+        ]
+    result = obj(status.get("result")) or await api.result(job_id)
+    url = obj(result.get("outputs")).get("build")
+    try:
+        built = obj(json.loads(await fetch_text(url))) if isinstance(url, str) else {}
+    except (CliError, ValueError):
+        built = {}
+    answer["built"] = built
+    if not built.get("ok"):
+        error = str(built.get("error") or "BUILD_FAILED")
+        hint = str(built.get("hint") or "it wrote no out/build.json")
+        lines = [f"the build on node {node_id} failed after {took}s: {error}: {short(hint, 600)}"]
+        if error == "NODE_TOO_OLD":
+            lines.append(NODE_UPDATE)
+        lines.append(f"its log: amsyos logs {job_id}")
+        return None, lines
+    how = "taken as it was" if built.get("env_reused") else "made"
+    out.note(f"built in {took}s: environment {built.get('env')} {how} (log: amsyos logs {job_id})")
+    return built, []
+
+
+async def _node_deploy(  # noqa: PLR0917 - the deploy's state, passed on
+    api: Api,
+    out: Out,
+    node_id: str,
+    service_id: str,
+    asset: str,
+    commands: dict[str, str],
+    built: dict[str, Any],
+) -> dict[str, Any]:
+    """node.deploy of the package with the card's command (and serve), waited for until the
+    node has unpacked it. Its jobs run as the node's own account (`as_node`, the node at
+    full and an admin, as node.exec was) only when the build's folder is closed to the job
+    account amsyos-job."""
+    params: dict[str, Any] = {"node": node_id, "service": service_id, "package": asset, **commands}
+    closed = built.get("closed_at")
+    if closed:
+        params["as_node"] = True
+        out.note(
+            f"its jobs run as the node's own account: {closed} is closed to the job account "
+            "amsyos-job (a job of an order there would fail); open it (chmod o+x) or set "
+            "AMSYOS_BUILD_HOME for the node, then deploy again, to have them run as amsyos-job"
+        )
+    try:
+        told = await api.instant("node.deploy", params)
+    except CliError as exc:
+        if "serve" not in params or not (
+            refused_field(exc, "serve") or ("command" in exc.hint and "required" in exc.hint)
+        ):
+            raise
+        if "command" not in params:
+            raise CliError(
+                "INVALID_CARD",
+                "serve: this Gateway's node.deploy does not take serve yet; give the card a "
+                "command too (each job then starts its own process)",
+            ) from None
+        del params["serve"]
+        out.note("this Gateway's node.deploy takes no serve yet: deployed with the command")
+        told = await api.instant("node.deploy", params)
+    action = str(told.get("action") or "")
+    for _ in range(36):  # the node had not answered in the call: up to 3 more minutes
+        if told.get("state") != "sent":
+            break
+        await asyncio.sleep(5)
+        listed = await api.instant("node.list")
+        for n in seq(listed.get("nodes")):
+            for done in seq(obj(n).get("actions")) if obj(n).get("node") == node_id else []:
+                if obj(done).get("action") == action and obj(done).get("state") != "sent":
+                    told = {**told, **obj(done)}
+    if told.get("state") != "done":
+        raise CliError(
+            "NODE_NOT_READY",
+            f"node.deploy on node {node_id}: {told.get('state')}"
+            + (f" ({short(str(told['hint']), 300)})" if told.get("hint") else "")
+            + "; when amsyos node list shows the node online, amsyos deploy again (the "
+            "environment made on it is kept)",
+            {"action": action},
+        )
+    out.note(f"deployed on node {node_id} (action {action})")
+    return told

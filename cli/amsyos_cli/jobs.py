@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from amsyos_cli.api import TERMINAL, WAIT_MAX_S, Api, Stop, until_done
+from amsyos_cli.api import TERMINAL, WAIT_MAX_S, Api, Stop, held_up, until_done
 from amsyos_cli.common import CliError, Out, amount, is_link, obj, plain_json, seq, short
 from amsyos_cli.events import follow_events
 from amsyos_cli.files import Saved, describe_saved, download, fetch_text
@@ -62,7 +62,7 @@ def status_line(status: dict[str, Any]) -> str:
         parts.append(eta)
     space = obj(status.get("space"))
     if space.get("state"):
-        parts.append(f"rented node {space['state']}")
+        parts.append(f"rented node {'up' if space['state'] == 'open' else space['state']}")
     return ", ".join(parts)
 
 
@@ -294,6 +294,11 @@ def status_lines(status: dict[str, Any]) -> list[str]:
             lines.append(f"  fixed before: {short(failure['fixed_before'], 200)}")
         lines += _log_pointer(status.get("job_id"), status, failure)
     space = obj(status.get("space"))
+    if held_up(status):
+        lines.append(
+            "  the rented node is up: run your services now. This job holds it until amsyos "
+            "node close or its hours are up; do not wait for its end"
+        )
     for key in ("minutes_left", "charged_so_far", "seconds", "charged", "warning", "stopped"):
         if key in space:
             said = amount(space[key]) if key.startswith("charged") else short(space[key], 200)
@@ -441,6 +446,9 @@ async def finish(
             waiting or f"it waits for somebody: amsyos wait {job_id} goes on until it is decided",
         )
         return 3, status
+    if held_up(status):  # a rented node's hold: up is what was waited for, not its end
+        out.emit({"job_id": job_id, "state": state, "status": status}, *status_lines(status))
+        return 0, status
     if state != "succeeded":
         shown = "closed" if space_closed(status) else state
         told = {"job_id": job_id, "state": shown, "status": hide_left(out, status)}

@@ -123,7 +123,9 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               finds the service by it.
   tags        Up to 20 words discover also finds it by: [csv, chart, plot].
   where       space: the organisation's rented node (default). node: an own node, a
-              computer of the organisation's joined with AMSYOS Node (node.deploy).
+              Linux computer of the organisation's joined with AMSYOS Node, at full:
+              deploy builds there by node.exec (an admin), --node n_… when there are
+              several; free (`amsyos deploy --help` says the steps).
   image       The image's name on the rented node (default: the service's, dots as _).
               Cards naming the same image share it: each build replaces what it runs for
               all of them, and AMSYOS runs the others' examples again. The version is the
@@ -167,6 +169,9 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               A format the call chooses: audio: {type: file, format: wav, controls:
               format, means: audio} with the input format: {enum: [wav, mp3], default:
               wav}; the program writes out/audio.<the chosen value>, one file.
+              Every output is required: the version's check fails when the example
+              made no file for it. One only some calls make says optional: true:
+              preview: {type: file, format: mp4, means: video, optional: true}.
               An output of means patch (a unified diff) is applied by
               `amsyos result <job> --apply`.
   means       What a file is, with the formats it may have: image png jpg webp gif tif
@@ -243,7 +248,7 @@ def problems(card: dict[str, Any]) -> list[str]:
         found.append("summary: what one call takes and makes, in English, 3 to 120 characters")
     where = card.get("where", "space")
     if where not in {"space", "node"}:
-        found.append("where: space or node")
+        found.append("where: space (the organisation's rented node) or node (an own node)")
     if card.get("runtime", "python") not in RUNTIMES:
         found.append(f"runtime: one of {', '.join(RUNTIMES)}")
     if not card.get("command") and not card.get("serve"):
@@ -258,6 +263,10 @@ def problems(card: dict[str, Any]) -> list[str]:
         for out_name, out in obj(outputs).items():
             if _format(out) is None:
                 found.append(f"outputs.{out_name}: a format, like png or {{format: png}}")
+            if obj(out).get("optional") not in (None, True, False):
+                found.append(
+                    f"outputs.{out_name}.optional: true (some calls make no such file) or false"
+                )
         found += chosen_problems(card)
     inputs: Any = card.get("inputs") or {}
     if not isinstance(inputs, dict):
@@ -367,6 +376,15 @@ def chosen_problems(card: dict[str, Any]) -> list[str]:
                 f"outputs.{out_name}.format: one of the values of input {by} ({_flow(values)})"
             )
     return found
+
+
+def optional_outputs(card: dict[str, Any]) -> set[str]:
+    """The outputs a call may leave unmade (`optional: true`): every other one is required,
+    and the version's check (a job on an own node too) fails without its file
+    (kernel/manifest.py `output_required`)."""
+    return {
+        str(n) for n, out in obj(card.get("outputs")).items() if obj(out).get("optional") is True
+    }
 
 
 def chosen_formats(card: dict[str, Any], params: Any) -> dict[str, str]:
@@ -632,10 +650,15 @@ def input_of(spec: Any) -> dict[str, Any]:
 def spec_of(card: dict[str, Any]) -> dict[str, Any]:
     """The card as the spec of a build's service: {summary, inputs, outputs, means, …}."""
     outputs = obj(card.get("outputs"))
+    optional = optional_outputs(card)
     spec: dict[str, Any] = {
         "summary": card.get("summary"),
         "inputs": {k: input_of(v) for k, v in obj(card.get("inputs")).items()},
-        "outputs": {k: _format(v) for k, v in outputs.items()},
+        # An output a call may leave unmade keeps the word (`{format, optional: true}`).
+        "outputs": {
+            k: {"format": _format(v), "optional": True} if k in optional else _format(v)
+            for k, v in outputs.items()
+        },
         "means": {
             k: obj(v).get("means") or MEANS_OF_FORMAT.get(str(_format(v)), "document")
             for k, v in outputs.items()
@@ -1735,6 +1758,7 @@ def render(card: dict[str, Any]) -> str:
         "# outputs: what a call makes, one file each: {type: file, format: png, means: image};",
         "#   the program writes out/<name>.<format>. means patch: a unified diff (--apply).",
         "#   controls: <an enum input of formats>: the call chooses the file's format.",
+        "#   Every output is required unless it says optional: true (some calls make none).",
     ]
     outputs = obj(card.get("outputs"))
     lines.append("outputs:" + ("" if outputs else " {}"))

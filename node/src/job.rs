@@ -5,7 +5,13 @@
 //! On Linux the same program also starts a job once it runs as the job account (`launch`,
 //! started by the node through sudo), checks a folder for it (`can-read`) and empties a job
 //! folder the node's user could not (`clean`).
+//!
+//! Node 2.1.2: a server kept warm (serve.rs) loops on `next` … `done` in any language, as on a
+//! rented node (sdk/bin/amsyos-job): `next` and `done` find the server's stdin and stdout
+//! through $AMSYOS_SERVE_PID where the machine has /proc (from any child of the server), else
+//! they are this command's own; the job now is kept in $AMSYOS_SERVE_STATE.
 
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -22,17 +28,134 @@ const USAGE: &str = "\
     amsyos-job output <name> [.ext]    the path to write the output <name> to
     amsyos-job progress <0-100>        how far the job is
     amsyos-job fail <hint> [code]      ends the job as failed (writes error.json, exits 1);
-                                       code: INVALID_PARAMS (default) or SERVICE_ERROR";
+                                       code: INVALID_PARAMS (default) or SERVICE_ERROR
+    amsyos-job next                    a server: waits for the next job, makes it the one
+                                       the commands above are about, prints its folder;
+                                       exits 1 when the node ends the server
+    amsyos-job done                    a server: the job now is done (after fail too)";
+
+/// A line of the server's protocol, each way (sdk/CONTRACT.md §3).
+pub const LINE_MAX: usize = 4096;
 
 fn wrong(why: &str) -> i32 {
     eprintln!("amsyos-job: {why}\n{USAGE}");
     2
 }
 
+/// The job's folder: $AMSYOS_JOB (a job started as a command), else the job a server took
+/// last with `next`, else the folder it runs in.
 fn folder() -> PathBuf {
-    let raw = std::env::var_os("AMSYOS_JOB").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let raw = std::env::var_os("AMSYOS_JOB")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| serving_now().map(|(_, f)| PathBuf::from(f)))
+        .unwrap_or_else(|| PathBuf::from("."));
     // Not canonicalize: on Windows that gives \\?\ paths some programs cannot use.
     std::path::absolute(&raw).unwrap_or(raw)
+}
+
+fn serve_state() -> Option<PathBuf> {
+    std::env::var_os("AMSYOS_SERVE_STATE").filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The job a server took last (`next`): its id and folder.
+fn serving_now() -> Option<(String, String)> {
+    let body = std::fs::read(serve_state()?).ok()?;
+    let v: Value = serde_json::from_slice(&body).ok()?;
+    Some((v.get("job")?.as_str()?.to_string(), v.get("folder")?.as_str()?.to_string()))
+}
+
+/// The job and folder a line of the node names, or None for anything else.
+pub fn job_line(line: &[u8]) -> Option<(String, String)> {
+    if line.len() > LINE_MAX {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(line).ok()?;
+    let job = v.get("job")?.as_str()?;
+    let folder = v.get("folder")?.as_str()?;
+    let ok = (1..=64).contains(&job.len()) && job.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    ok.then(|| (job.to_string(), folder.to_string()))
+}
+
+/// The server's own stdin (`write` false) or stdout, however this command was started.
+fn channel(write: bool) -> Result<std::fs::File, String> {
+    let what = if write { "stdout" } else { "stdin" };
+    #[cfg(unix)]
+    {
+        let pid = std::env::var("AMSYOS_SERVE_PID").unwrap_or_default();
+        if !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()) && Path::new("/proc/self").exists() {
+            let path = format!("/proc/{pid}/fd/{}", u8::from(write));
+            let opened = if write {
+                std::fs::OpenOptions::new().write(true).open(&path)
+            } else {
+                std::fs::File::open(&path)
+            };
+            return opened.map_err(|e| format!("cannot open the server's {what}: {e}"));
+        }
+        use std::os::fd::AsFd;
+        let owned = if write { std::io::stdout().as_fd().try_clone_to_owned() } else { std::io::stdin().as_fd().try_clone_to_owned() };
+        owned.map(std::fs::File::from).map_err(|e| format!("cannot use {what}: {e}"))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        let owned = if write { std::io::stdout().as_handle().try_clone_to_owned() } else { std::io::stdin().as_handle().try_clone_to_owned() };
+        owned.map(std::fs::File::from).map_err(|e| format!("cannot use {what}: {e}"))
+    }
+}
+
+/// `next`: one line of the node's, byte by byte (nothing after it is taken).
+fn take_next() -> Result<i32, String> {
+    let Some(state) = serve_state() else {
+        return Ok(wrong("next: only a server (a service switched on with serve) takes jobs"));
+    };
+    let mut given = channel(false)?;
+    let (job, folder) = loop {
+        let (mut line, mut byte, mut ended) = (Vec::new(), [0u8; 1], false);
+        loop {
+            match given.read(&mut byte) {
+                Ok(0) => {
+                    ended = true;
+                    break;
+                }
+                Ok(_) if byte[0] == b'\n' => break,
+                Ok(_) => {
+                    if line.len() <= LINE_MAX {
+                        line.push(byte[0]);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        if let Some(found) = job_line(&line) {
+            break found;
+        }
+        if ended {
+            return Ok(1); // the node ended the server
+        }
+    };
+    let fresh = state.with_extension("new");
+    let body = serde_json::json!({"job": job, "folder": folder}).to_string();
+    std::fs::write(&fresh, body).map_err(|e| format!("cannot write {}: {e}", fresh.display()))?;
+    std::fs::rename(&fresh, &state).map_err(|e| format!("cannot write {}: {e}", state.display()))?;
+    println!("{folder}");
+    Ok(0)
+}
+
+/// `done`: the line that ends the job now, on the server's stdout.
+fn say_done() -> Result<i32, String> {
+    let Some((job, _)) = serving_now() else { return Ok(wrong("done: no job was taken with next")) };
+    let mut said = channel(true)?;
+    said.write_all(format!("{}\n", serde_json::json!({"done": job})).as_bytes())
+        .map_err(|e| format!("cannot say the job is done: {e}"))?;
+    if let Some(state) = serve_state() {
+        let _ = std::fs::remove_file(state);
+    }
+    Ok(0)
 }
 
 fn told() -> Result<Value, String> {
@@ -135,9 +258,8 @@ fn run(args: &[String]) -> Result<i32, String> {
         ("probe", n) if n >= 1 => return Ok(unix::probe(&rest[0], &rest[1..])),
         #[cfg(unix)]
         ("clean", 1) => return Ok(unix::clean(Path::new(&rest[0]))),
-        ("next", _) | ("done", _) => {
-            return Ok(wrong("next/done: a server kept warm is not part of AMSYOS Node 2.0"));
-        }
+        ("next", 0) => return take_next(),
+        ("done", 0) => return say_done(),
         _ => return Ok(wrong(&format!("not understood: {:?}", crate::util::cut(&args.join(" "), 80)))),
     }
     Ok(0)
@@ -171,7 +293,8 @@ mod unix {
     }
 
     /// `launch --job <folder> --dir <service folder> --bin <dir> --nice <n> --mem <bytes>
-    /// --cpu-s <seconds> -- <command line>` (`--as` is the old name of `--mem`)
+    /// --cpu-s <seconds> [--serve <state file>] -- <command line>` (`--as` is the old name of
+    /// `--mem`; `--serve`: a server kept warm, node 2.1.2)
     pub fn launch(args: &[String]) -> Result<i32, String> {
         let split = args.iter().position(|a| a == "--").ok_or("launch: -- <command> is missing")?;
         let (opts, command) = (&args[..split], args[split + 1..].join(" "));
@@ -220,13 +343,25 @@ mod unix {
             .arg(&command)
             .env_clear()
             .env("PATH", format!("{bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
+            .env("PYTHONPATH", format!("{bin}/python")) // node 2.1.2: `from amsyos import job`
             .env("HOME", job)
             .env("TMPDIR", format!("{job}/tmp"))
-            .env("AMSYOS_JOB", job)
             .env("LANG", "C.UTF-8")
             .env("USER", "amsyos-job")
-            .stdin(Stdio::null())
             .process_group(0);
+        match value(opts, "--serve") {
+            // Node 2.1.2: a server kept warm (serve.rs). `job` is its own folder, not a job's;
+            // its stdin is the node's pipe of jobs, which `amsyos-job next` and `done` reach
+            // from any child through this process (it holds the pipes as long as the server).
+            Some(state) => {
+                cmd.env("AMSYOS_SERVE_PID", std::process::id().to_string())
+                    .env("AMSYOS_SERVE_STATE", state)
+                    .stdin(Stdio::inherit());
+            }
+            None => {
+                cmd.env("AMSYOS_JOB", job).stdin(Stdio::null());
+            }
+        }
         let mut child = cmd.spawn().map_err(|e| format!("cannot start /bin/sh: {e}"))?;
         CHILD_GROUP.store(child.id() as i32, Ordering::SeqCst);
         let status = child.wait().map_err(|e| e.to_string())?;

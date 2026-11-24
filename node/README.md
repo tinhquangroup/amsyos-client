@@ -10,7 +10,9 @@ service does is contract 1: [sdk/CONTRACT.md](../sdk/CONTRACT.md) §3.
 No Rust on the VPS: `node/build.sh` builds in Docker (`rust:1.99.0-bookworm`, with mingw and
 musl) and writes `node/dist/amsyos-node.exe` (Windows x86_64) and `node/dist/amsyos-node`
 (Linux x86_64, static). `node/build.sh linux|windows` builds one; the cargo registry is kept
-in the volume `amsyos-node-cargo`.
+in the volume `amsyos-node-cargo`. The Python job module, `sdk/amsyos/__init__.py`, is built
+into the program (`src/pymod.rs`): `build.sh` copies it to `py/amsyos/` first, since only
+`node/` is mounted in Docker.
 
 ## On a computer
 
@@ -21,7 +23,7 @@ command). Then, at the machine (Windows: a cmd window of an administrator; Linux
 ```
 amsyos-node setup [--jobs D:\AMSYOS\jobs]         once: the job account amsyos-job, the jobs folder
 amsyos-node join <code> --gateway https://<host> [--server] [--name <name>]
-amsyos-node enable <service id> --dir <folder> --command "<command line>" [--as-job]
+amsyos-node enable <service id> --dir <folder> --command "<command line>" [--serve "<command line>"] [--as-job]
 amsyos-node access services|managed|full [--as-node-default]   the level; full needs an administrator
 amsyos-node access as-node-default on|off          at full: services run as this account by default
 amsyos-node allow <name> <folder>                  2.1: jobs read it in place as folder:<name>/<path>
@@ -36,7 +38,25 @@ amsyos-node diag [<folder>]                        Windows: why a job does not s
 **A new version of the program:** stop the node (its scheduled task, or Ctrl+C), run the new
 file's `setup` again in an administrator window with the same `--jobs` (and `--services`) as
 before (it copies the program into `%ProgramFiles%\AMSYOS\Node` and sets the folders' ACLs
-again), then start the node again. Join, services, the level and its default are kept.
+again), then start the node again. Join, services, the level and its default are kept. On
+Linux, run `sudo amsyos-node setup` again the same way: it copies `amsyos-job` and the Python
+job module that every job uses (`run` warns while they are not this version's).
+
+**Python jobs (2.1.2).** Every job's PYTHONPATH holds the module `amsyos` (`from amsyos import
+job, serve`, the same as on a rented node), written by `setup` in `bin/python`. A PYTHONPATH the
+service's command sets wins (it keeps the module with `:$PYTHONPATH`, `;%PYTHONPATH%` on
+Windows); a job run as the node's account has the node's own PYTHONPATH first. A service ships
+no copy of it.
+
+**A server kept warm (2.1.2).** `enable … --serve "python server.py"` (or `node.deploy` with
+`serve`), beside or instead of `--command`: the node starts the server for a job and keeps it
+for the next ones; it loads what it needs once. The job's line comes on its stdin and its end
+goes on its stdout (`serve(handle)` in Python, `amsyos-job next` … `done` in any language).
+One process serves one service version, one account and one payer (the kernel's
+`serve_key`); it is held to a cold job's limits and ends after 10 idle minutes, 100 jobs or an
+hour, or when its service changes. A failing job ends the job, not the server; a server that
+ends before it takes its job falls back to `--command`; one that ends while it does the job
+fails that job (src/serve.rs).
 
 `run` and `try` refuse SYSTEM and root, and an elevated Windows process unless
 `--allow-elevated` (a Windows with UAC off has no other kind). Each job runs as `amsyos-job`

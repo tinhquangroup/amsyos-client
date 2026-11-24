@@ -33,7 +33,7 @@ Each call is one run of the image's `command` in its source folder, as an unpriv
 |---|---|
 | `job.json` | `{"params": {...}, "inputs": {"<name>": "in/<file>"}, "service": {"id", "version"}}`: params checked, defaults filled in; `service` says which service the job is for (an image several services share tells their jobs apart by it; additive, a job may ignore it) |
 | `in/` | the input files |
-| `out/<output>.<ext>` | one file an output, as the card declares it; at most 2 GB in all a job: over it the job fails `OUTPUT_TOO_BIG`, naming each file and its size (empty files and files over it are not kept as a failed job's partial files) |
+| `out/<output>.<ext>` | one file an output, as the card declares it (one it marks `optional: true` may be left out); at most 2 GB in all a job: over it the job fails `OUTPUT_TOO_BIG`, naming each file and its size (empty files and files over it are not kept as a failed job's partial files) |
 | `progress` | optional, 0 to 100 |
 | `error.json` | optional, `{"error": "INVALID_PARAMS" or "SERVICE_ERROR", "hint": "..."}` with exit code 1: what the caller reads to fix its call |
 
@@ -72,10 +72,12 @@ Following the folder layout by hand is just as good.
 
 When a version of own code is defined, AMSYOS runs its `example` once, as the manager who defined it, in the same workspace, paid like any job. Then it checks that:
 - the job succeeded;
-- every declared output is there and not empty;
+- every declared output is there and not empty (an output marked `optional: true`, which only some calls make, may be missing);
 - each file's first bytes are its declared format (images: png, jpg, webp, gif, tif, psd; pdf; video and sound: mp4/mov/m4a, webm/mkv, wav, mp3, ogg, flac; archives and documents: zip, xlsx, docx, pptx, odt, gz/tgz, tar; glb, parquet), JSON (json, gltf, geojson) parses and text (txt, md, csv, srt, vtt, html, obj, bvh) is UTF-8; `kernel/conform.py` holds the list.
 
 Until the check has passed, the organisation may run the version itself, but `mission.plan` does not join it and `offer.make` refuses it. `describe` shows `check: {state, job, at, problems}`. Building the same tag again checks again.
+
+A check job that a kernel restart ended is not charged and judges nothing: the check starts again by itself, once. If a restart ends it again, or the service acts outside AMSYOS (`effect: external`, never repeated by itself), the check fails. Define the same version again, unchanged (`service.define` with the same spec, also for `compute: node`), to run it again.
 
 ## 6. What changes the contract
 

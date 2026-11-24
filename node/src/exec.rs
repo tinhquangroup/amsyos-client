@@ -35,6 +35,9 @@ pub struct Launch {
     /// TODO(review): isolation — true only for `node.exec` and an `as_node` service's direct
     /// job at level `full` (net.rs decides): the node's own account, no logon, no memory cap.
     pub as_node: bool,
+    /// Node 2.1.2: a server kept warm (serve.rs): where `amsyos-job next` keeps the job now.
+    /// `job_dir` is then the server's own folder; its stdin is a pipe the node writes jobs to.
+    pub serve_state: Option<PathBuf>,
 }
 
 /// A job's `limits` (sdk/NODE.md §2), bounded here whatever the kernel sent.
@@ -217,31 +220,39 @@ pub fn collect_outputs(jd: &JobDir, declared: Option<&[String]>) -> (Vec<OutFile
     (outs, notes)
 }
 
-struct Tail {
+pub struct Tail {
     buf: VecDeque<u8>,
     cap: usize,
 }
 
 impl Tail {
-    fn new(cap: usize) -> Tail {
+    pub fn new(cap: usize) -> Tail {
         Tail { buf: VecDeque::new(), cap }
     }
-    fn push(&mut self, data: &[u8]) {
+    pub fn push(&mut self, data: &[u8]) {
         let data = &data[data.len().saturating_sub(self.cap)..];
         let over = (self.buf.len() + data.len()).saturating_sub(self.cap);
         self.buf.drain(..over.min(self.buf.len()));
         self.buf.extend(data);
     }
-    fn text(&self) -> String {
+    pub fn text(&self) -> String {
         let (a, b) = self.buf.as_slices();
         String::from_utf8_lossy(&[a, b].concat()).into_owned()
     }
 }
 
-struct Logs {
-    all: Tail,
-    out: Tail,
-    err: Tail,
+/// What a job's processes wrote: all of it (the node's log of the job), and the ends of
+/// stdout and stderr (what the job `said`).
+pub struct Logs {
+    pub all: Tail,
+    pub out: Tail,
+    pub err: Tail,
+}
+
+impl Logs {
+    pub fn new() -> Logs {
+        Logs { all: Tail::new(LOG_MAX), out: Tail::new(8192), err: Tail::new(8192) }
+    }
 }
 
 /// How a job's process ended.
@@ -254,6 +265,9 @@ pub struct Ended {
     pub stderr: String,
     pub log: String,
     pub ran: Duration,
+    /// Node 2.1.2: a served job whose server ended before it said the job was done: what
+    /// happened, in words ("the server ended while it did the job"); the job failed.
+    pub broke: Option<String>,
 }
 
 impl Ended {
@@ -274,6 +288,9 @@ impl Ended {
         if let Some(e) = read_error(jd) {
             return Err(e);
         }
+        if let Some(broke) = &self.broke {
+            return Err(("SERVICE_ERROR".into(), self.why(broke)));
+        }
         if self.exit != 0 {
             return Err(("SERVICE_ERROR".into(), self.exited()));
         }
@@ -284,6 +301,11 @@ impl Ended {
     /// is empty) that says why: the last one naming an error, else the last one. The hint
     /// is what `amsyos.result` shows; `said` has the longer end.
     pub fn exited(&self) -> String {
+        self.why(&format!("the service exited with code {}", self.exit))
+    }
+
+    /// `lead`, and the line that says why.
+    fn why(&self, lead: &str) -> String {
         let said = self.said();
         let lines: Vec<&str> = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         let why = |l: &&&str| {
@@ -294,13 +316,9 @@ impl Ended {
                     .any(|w| l.contains(w))
         };
         let Some(line) = lines.iter().rev().find(why).or(lines.last()) else {
-            return format!("the service exited with code {} and printed nothing", self.exit);
+            return format!("{lead} and printed nothing");
         };
-        format!(
-            "the service exited with code {}: {} (said: the end of its stderr)",
-            self.exit,
-            util::cut(line, 300)
-        )
+        format!("{lead}: {} (said: the end of its stderr)", util::cut(line, 300))
     }
 }
 
@@ -327,10 +345,11 @@ pub async fn execute(
         server,
         node_dir: node_dir.to_path_buf(),
         as_node,
+        serve_state: None,
     };
     let started = Instant::now();
     let spawned = tokio::task::spawn_blocking(move || sys::spawn(&launch)).await.map_err(|e| e.to_string())??;
-    let logs = Arc::new(Mutex::new(Logs { all: Tail::new(LOG_MAX), out: Tail::new(8192), err: Tail::new(8192) }));
+    let logs = Arc::new(Mutex::new(Logs::new()));
     let readers: Vec<_> = [(spawned.stdout, false), (spawned.stderr, true)]
         .into_iter()
         .map(|(mut pipe, is_err)| {
@@ -395,6 +414,7 @@ pub async fn execute(
         stderr: l.err.text(),
         log: l.all.text(),
         ran,
+        broke: None,
     })
 }
 

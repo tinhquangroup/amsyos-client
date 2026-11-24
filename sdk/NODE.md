@@ -1,10 +1,11 @@
-# AMSYOS Node, protocol 1 (node 2.1)
+# AMSYOS Node, protocol 1 (node 2.1.2)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
 `drivers/node.py` (placing jobs). JSON everywhere; every message is one WebSocket text frame
 of at most 64 KiB. Nothing ever dials into the node. Node 2.1 adds the folders its person
-allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no such job.
+allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no such job. Node
+2.1.2 puts the Python job module on every job's PYTHONPATH and keeps a server warm (§4).
 A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
 
@@ -83,6 +84,11 @@ Gateway → node:
             "vram_gb": null, "max_runtime_s": 3600, "max_output_mb": 200}}
 ```
 
+A job of a service (not `node.exec`) also carries `"serve_key": "<64 hex>"` (2.1.2): who may
+share a warm server with it (§4), a digest of the service, its version, the workspace and who
+pays (the organisation itself, or an order's buyer). The node compares it and never learns
+what it is made of; a job without it gets a server of its own.
+
 The node checks everything itself: the service is on its own list (else it answers
 `refused`), `file` matches `^in/[a-z][a-z0-9_]{0,63}(\.[a-z0-9]{1,11})?$`, output names
 match `^[a-z][a-z0-9_]{0,63}$`. `folders` (2.1, only for an input of `type: folder`): each
@@ -119,7 +125,8 @@ The links are signed by the kernel for this job and this node only, and expire.
 ## 4. On the machine
 
 - **Switching a service on** is done only by the person at the machine:
-  `amsyos-node enable <service id> --dir <folder> --command "<command line>" [--as-job]`,
+  `amsyos-node enable <service id> --dir <folder> --command "<command line>" [--serve "<command
+  line>"] [--as-job]` (`--command`, `--serve` or both),
   `amsyos-node disable <service id>`, `amsyos-node services` (what is on, and what the machine
   could serve: the software found). The list lives on the machine. The kernel sends params
   and file links only: never code, never a command to install anything.
@@ -128,8 +135,42 @@ The links are signed by the kernel for this job and this node only, and expire.
   "in/<file>"}}`; a node before 2026-11-23 wrote `service` as the id alone), `in/`,
   `out/`, optional `progress` and `error.json`; `$AMSYOS_JOB` names the folder; the command
   runs in the service's folder. The node program is also `amsyos-job`
-  (`amsyos-node job <params|param|input|service|service-version|output|progress|fail> …`,
+  (`amsyos-node job <params|param|input|service|service-version|output|progress|fail|next|done> …`,
   and a copy named `amsyos-job` on the job's `PATH`).
+- **The Python job module (2.1.2).** `from amsyos import job, serve` (`sdk/amsyos`, built into
+  the program) works in every job, whatever account it runs as: `setup` writes it into
+  `bin/python` (Windows `%ProgramData%\AMSYOS\Node\bin\python`, Linux
+  `/usr/local/lib/amsyos-node/python`), which is on every job's `PYTHONPATH`. A PYTHONPATH the
+  service's command sets wins; a job run as the node's own account has the node's own
+  PYTHONPATH first. `run` writes the module when it can and otherwise says to run `setup`
+  again, as it does when `amsyos-job` is not this program's copy.
+- **A server kept warm (2.1.2; contract 1 §3).** A service switched on with `enable … --serve
+  "<command line>"`, or deployed with `serve` (§5), beside or instead of its command:
+  - the node starts the server, in the service's folder, for a job, and keeps it for the next
+    ones. It gives each job as one line on its stdin, `{"job": "j_…", "folder": "<the job's
+    folder>"}`, and the server answers `{"done": "j_…"}` on its stdout, each at most 4,096
+    bytes; anything else it writes is the job's log. Python `serve(handle)`, or in any
+    language a loop on `amsyos-job next` … `amsyos-job done`, which reach the server's stdin
+    and stdout through `$AMSYOS_SERVE_PID` (Linux, from any child) or their own, and keep the
+    job now in `$AMSYOS_SERVE_STATE`. The server's own folder (its HOME and `tmp`) lies in
+    the jobs folder; it has no `$AMSYOS_JOB`;
+  - **who shares one** (TODO(review): isolation): one process serves one service version, one
+    account (`amsyos-job`, or the node's own for a direct job as §5 says) and one
+    `serve_key`, with the same folder, server command and `limits`. A job of an order never
+    shares a process with the organisation's own jobs, nor one buyer's with another's;
+  - **limits**: a cold job's (`amsyos-job launch`: RLIMIT_DATA, its CPU share; the Job Object
+    on Windows), with no CPU-time limit adding up over jobs: the node holds each job to its
+    `max_runtime_s`. At most `slots` servers (2 at least), their declared memory within the
+    machine's; the idle one unused longest is stopped first, and with no room a job gets a
+    server of its own that ends with it;
+  - **its end**: 10 idle minutes (the rented node's default), 100 jobs or an hour, its service
+    switched off or deployed again, or the node stopping (its stdin closed, then killed after
+    5 s). A job that fails (`error.json`, an exception in the handler) ends the job, not the
+    server. A job out of time or cancelled stops its server. A server that ends before it read
+    its job's line (it failed while loading, or while it waited) is no failure of the job: a
+    fresh server takes it, or the service's command when it has one. A server that ends while
+    it does a job fails that job (`SERVICE_ERROR`, the end of what it wrote): the node never
+    runs a job twice by itself (spec §2, principle 9).
 - **The folders above a job.** A program that walks its own path (Node.js resolving its
   script, PowerShell setting its start location) reads the attributes of every folder above
   it. On Windows `setup` lets the job account pass through, and read the attributes of, the
@@ -203,13 +244,16 @@ with `as_node_default`.
 
 ```
 {"t": "action", "id": "x_…", "what": "deploy", "by": "u_…",
- "service": "t_org.name.sub", "command": "<command line>", "as_node": false,
+ "service": "t_org.name.sub", "command": "<command line>", "serve": "<command line>",
+ "as_node": false,
  "package": {"url": "https://…/node/in/<token>", "sha256": "<hex>", "size": 1234}}
 {"t": "action", "id": "x_…", "what": "switch", "by": "u_…", "service": "…", "on": true}
 {"t": "action", "id": "x_…", "what": "lower", "by": "u_…", "access": "services" | "managed"}
 ```
 
 - **deploy** (level `managed` or `full`; `as_node` only at `full`):
+  - `command`, `serve` (2.1.2: a server kept warm, §4) or both; the kernel sends `serve` only to
+    a node that says 2.1.2 or later, and leaves it out when not given;
   - the node fetches the package (a zip, at most 200 MB, from the Gateway's own origin) and
     checks its SHA-256;
   - it unpacks it into a new folder under its managed services root. No entry may leave the

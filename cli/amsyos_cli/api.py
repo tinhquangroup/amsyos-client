@@ -33,12 +33,23 @@ TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 WAIT_MAX_S = 50  # `wait_s` of run and status: at most 50 s (the owner, 2026-11-17)
 
 
+def held_up(status: dict[str, Any]) -> bool:
+    """A rented node's hold (`node.rent`'s job) whose node is up: it runs until the node is
+    given back, so a client stops waiting for it here, not at its end."""
+    space: Any = status.get("space")
+    if status.get("state") != "running" or not isinstance(space, dict):
+        return False
+    job: Any = space.get("job")  # pyright: ignore[reportUnknownMemberType]
+    up: Any = space.get("state")  # pyright: ignore[reportUnknownMemberType]
+    return up == "open" and bool(job) and job == status.get("job_id", job)
+
+
 def done(status: dict[str, Any]) -> bool:
     """A job a client stops waiting for: it has ended, or it waits for a person or an agent
     to act (as the kernel's `_somebody_acts`: an order that runs to its end by itself is
-    still work being done)."""
+    still work being done), or it holds a rented node that is up (`held_up`)."""
     state = status.get("state")
-    if state in TERMINAL:
+    if state in TERMINAL or held_up(status):
         return True
     if state != "waiting":
         return False

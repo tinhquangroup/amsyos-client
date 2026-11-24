@@ -1,7 +1,8 @@
 //! AMSYOS Node 2.1: one program that makes an organisation's own computer a place where its
 //! services run (spec v2 §26; the protocol is sdk/NODE.md, the job contract sdk/CONTRACT.md).
 //! Named `amsyos-job`, the same program is the job contract's command. 2.1 reads the folders
-//! the person at the machine allowed, in place (spec v3 §8.3, folder.rs).
+//! the person at the machine allowed, in place (spec v3 §8.3, folder.rs). 2.1.2 ships the
+//! Python job module on every job's PYTHONPATH (pymod.rs) and keeps servers warm (serve.rs).
 
 mod config;
 mod deploy;
@@ -11,6 +12,8 @@ mod guard;
 mod job;
 mod machine;
 mod net;
+mod pymod;
+mod serve;
 mod util;
 
 #[cfg(unix)]
@@ -28,19 +31,22 @@ use serde_json::Value;
 use config::{Access, Config, Service, Services};
 
 const USAGE: &str = "\
-AMSYOS Node 2.1: this computer runs its organisation's services. Nothing dials into it.
+AMSYOS Node 2.1.2: this computer runs its organisation's services. Nothing dials into it.
 
   amsyos-node setup [--user <name>] [--jobs <folder>] [--services <folder>]
-        once, as an administrator (Windows) or root (Linux: sudo): the job account
-        amsyos-job, the jobs folder (--jobs), the managed services folder (--services) and
-        their permissions;
+        once, as an administrator (Windows) or root (Linux: sudo), and again after each new
+        version: the job account amsyos-job, the jobs folder (--jobs), the managed services
+        folder (--services), their permissions, and what every job finds (amsyos-job, the
+        Python module `amsyos` on its PYTHONPATH);
         on Windows it also installs the program in %ProgramFiles%\\AMSYOS\\Node: run it from there
   amsyos-node join <code> --gateway https://<host> [--server] [--name <name>]
         join the organisation with a code a manager made (node.join_code)
-  amsyos-node enable <service id> --dir <folder> --command \"<command line>\" [--gpu] [--as-job]
+  amsyos-node enable <service id> --dir <folder> --command \"<command line>\" [--serve \"<command line>\"] [--gpu] [--as-job]
         switch a service on: its command runs in <folder> as amsyos-job, which may read the
         folder but never write to it (on Windows the folder gets a protected ACL); at full
-        with the default as_node on, as this account instead, unless --as-job
+        with the default as_node on, as this account instead, unless --as-job. --serve
+        (beside or instead of --command): a server kept warm, started once, that does the
+        jobs one after the other (Python: from amsyos import serve)
   amsyos-node disable <service id>
   amsyos-node access services|managed|full [--as-node-default]
         what the organisation may do here from afar: services (the default) call what is
@@ -65,7 +71,7 @@ AMSYOS Node 2.1: this computer runs its organisation's services. Nothing dials i
   amsyos-node run [--allow-elevated]
         go online: take jobs until stopped (Ctrl+C)
   amsyos-node info              what this machine has (JSON)
-  amsyos-node job <params|param|input|output|progress|fail> …   (also as amsyos-job)
+  amsyos-node job <params|param|input|output|progress|fail|next|done> …   (also as amsyos-job)
   amsyos-node version";
 
 struct Args {
@@ -196,6 +202,9 @@ fn setup(args: &[String]) -> Result<i32, String> {
     let jobs = a.one("--jobs").map(PathBuf::from);
     let services = a.one("--services").map(PathBuf::from);
     sys::setup(a.one("--user").map(String::from), jobs, services)?;
+    // Node 2.1.2: the Python job module every job finds (`from amsyos import job, serve`).
+    pymod::install()?;
+    println!("{}: the Python job module, on every job's PYTHONPATH", pymod::module_path().display());
     Ok(0)
 }
 
@@ -256,7 +265,8 @@ fn services() -> Result<i32, String> {
             } else if s.as_job {
                 tags.push("as_job".into());
             }
-            println!("  {id}  ({})\n      dir: {}\n      command: {}", tags.join(", "), s.dir.display(), s.command);
+            let how = if s.served().is_some() { "" } else { "command: " };
+            println!("  {id}  ({})\n      dir: {}\n      {how}{}", tags.join(", "), s.dir.display(), s.shown());
         }
     }
     let (_, found) = machine::probe(&cfg.jobs_root());
@@ -285,7 +295,7 @@ fn services() -> Result<i32, String> {
 }
 
 fn enable(args: &[String]) -> Result<i32, String> {
-    let a = Args::parse(args, &["--dir", "--command"], &["--gpu", "--as-job"])?;
+    let a = Args::parse(args, &["--dir", "--command", "--serve"], &["--gpu", "--as-job"])?;
     let mut problems = Vec::new();
     let id = a.pos.first().cloned().unwrap_or_default();
     if a.pos.len() != 1 || !util::is_service_id(&id) {
@@ -298,8 +308,10 @@ fn enable(args: &[String]) -> Result<i32, String> {
         None => problems.push("--dir <folder>: the service's folder, where its command runs".into()),
     }
     let command = a.one("--command").unwrap_or("").trim().to_string();
-    if command.is_empty() || command.len() > 2000 || command.chars().any(char::is_control) {
-        problems.push("--command \"<command line>\": one line, at most 2000 characters".into());
+    let serve = a.one("--serve").unwrap_or("").trim().to_string();
+    let bad = |c: &String| c.len() > 2000 || c.chars().any(char::is_control);
+    if (command.is_empty() && serve.is_empty()) || bad(&command) || bad(&serve) {
+        problems.push("--command \"<command line>\" (or --serve, or both): each one line, at most 2000 characters".into());
     }
     if !problems.is_empty() {
         return Err(problems.join("\n"));
@@ -334,6 +346,7 @@ fn enable(args: &[String]) -> Result<i32, String> {
     }
     let mut svc = Service::new(dir.clone(), command, a.flag("--gpu"));
     svc.as_job = a.flag("--as-job");
+    svc.serve = (!serve.is_empty()).then_some(serve);
     let as_node = svc.runs_as_node(cfg.as_node_by_default());
     let mut on = Services::load(&node_dir);
     on.services.insert(id.clone(), svc);
@@ -669,7 +682,7 @@ fn try_service(args: &[String]) -> Result<i32, String> {
             println!("  {note}");
         }
     }
-    println!("job {job_id}: {} in {}", svc.command, svc.dir.display());
+    println!("job {job_id}: {} in {}", svc.shown(), svc.dir.display());
     println!("job folder: {}", jd.dir.display());
     let ended = runtime()?.block_on(async {
         let (tx, rx) = tokio::sync::watch::channel(false);
@@ -678,7 +691,19 @@ fn try_service(args: &[String]) -> Result<i32, String> {
                 let _ = tx.send(true);
             }
         });
-        exec::execute(&jd, &svc, &limits, cfg.is_server(), &node_dir, as_node, rx, |p| println!("progress: {p}")).await
+        if svc.served().is_some() {
+            // A server of its own, for this job alone (nothing is kept warm by `try`).
+            let pool = serve::Pool::new(0, 0.0);
+            let (ended, how) = serve::execute(
+                &pool, None, &jd, &job_id, &svc, id, &limits, cfg.is_server(), &node_dir, &cfg.jobs_root(), as_node, rx,
+                |p| println!("progress: {p}"),
+            )
+            .await?;
+            println!("served: {how}");
+            Ok(ended)
+        } else {
+            exec::execute(&jd, &svc, &limits, cfg.is_server(), &node_dir, as_node, rx, |p| println!("progress: {p}")).await
+        }
     })?;
     exec::keep_log(&node_dir, &job_id, &ended);
     println!("exit code: {} (ran {:.1} s)", ended.exit, ended.ran.as_secs_f64());

@@ -21,8 +21,8 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
 - This repository as a service: `amsyos init` binds it and proposes `amsyos.yaml` (fill each
   `<fill: ...>`; `amsyos card --help`: every key); a desk of many services: `--type studio`, one
   that only uses services: `--type work`. `amsyos card --check` (AMSYOS too, free); `amsyos run
-  --local` tries it here, free; MACHINE_TOO_SMALL: `deploy --dry-run`, `deploy [--channel stable]`
-  on a rented node; `amsyos promote <service> <version>`; `amsyos contract <gp_...|service|need>`:
+  --local` tries it here, free; MACHINE_TOO_SMALL: `deploy --dry-run`, `deploy [--channel stable]` on
+  a rented or own node; `amsyos promote <service> <version>`; `amsyos contract <gp_...|service|need>`:
   what a build must meet. Nodes: `amsyos node list|show|rent [--hours h] [--gpu none]|extend|close`.
 - A patch output: `amsyos result <job> --apply` names the files, then `git apply --3way`.
 - Beside other agents of the workspace: `amsyos run note.post topic=<t> text=...`, `note.list
