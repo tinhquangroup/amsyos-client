@@ -8,7 +8,8 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   (refused by your host? the person runs it), then retry. Not logged in: `amsyos setup <file>`
   ({{GATEWAY}}/start), else `amsyos login`. First `amsyos whoami`: who, where, credit, what to try.
 - Project memory: `amsyos sync` prints its brief (services, last deploy and check, warnings, what
-  failed and what fixed it) into the host's file; `amsyos why <topic>`: the facts behind a line.
+  failed and what fixed it, lessons) into the host's file; `amsyos why <topic>`: the facts behind it.
+  Past a blocker of yours: `amsyos run note.post topic=lesson/<area> text="symptom; cause; fix; job"`.
 - Find a service: `amsyos discover "<words>"` (any language; English works best; none: where to
   start; `--need need.json`: plans with a quote): AMSYOS's platform services, your organisation's
   own and those offered to it. `amsyos describe <service>`: its inputs, examples, a `run` line.
@@ -25,9 +26,8 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   a rented or own node; `amsyos promote <service> <version>`; `amsyos contract <gp_...|service|need>`:
   what a build must meet. Nodes: `amsyos node list|show|rent [--hours h] [--gpu none]|extend|close`.
 - A patch output: `amsyos result <job> --apply` names the files, then `git apply --3way`.
-- Beside other agents of the workspace: `amsyos run note.post topic=<t> text=...`, `note.list
-  topic=<t>` (its subtopics too); `lease.take what=<x>` while you change something, `lease.release`
-  after. Wait: `amsyos watch --note <t> [--after <n_...>]`, `--free <x>`, `--handover <ho_...>`.
+- Beside other agents: `note.post topic=<t>`, `note.list`; `lease.take what=<x>` while you change
+  something, then `lease.release`. Wait: `amsyos watch --note <t>|--free <x>|--handover <ho_...>`.
 - Refused for a power or the budget: `amsyos grant ask --may <power>`, `--services <id>` or
   `--budget <credit>`, then wait for the person. Never work around a refusal.
 - Every error carries `hint`: the next action to take. `--verbose` says what fell back.

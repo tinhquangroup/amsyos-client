@@ -30,7 +30,10 @@ overwrites it.
 Inside it you build, check and fix without asking.
 
 - Builds: up to 30 a day (UTC) in all, and up to 5 attempts at one goal (a service, or one
-  fix of it). At the 5th failure of the same goal, stop it: write in `log.md` what blocked it
+  fix of it). Each time you get past a blocker, post the lesson where every later session of
+  the organisation reads it (the brief's "Lessons"): `amsyos run note.post topic=lesson/<area>
+  text="symptom (code, service@version, job); cause; fix; the job that proves it"`.
+  At the 5th failure of the same goal, stop it: write in `log.md` what blocked it
   and what you would try next, send `amsyos feedback` when AMSYOS was in the way, and go on
   to the next goal. Come back later with a different approach, not the same one.
 - Checks and trials: calls of your own services, as many as the work needs; give long ones
