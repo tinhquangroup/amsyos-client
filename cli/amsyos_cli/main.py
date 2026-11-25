@@ -2124,6 +2124,28 @@ def parser() -> Parser:
         help="Claude Code's prompt hook: only what this project was not told yet, at most 5 "
         "lines, at most once a minute; nothing on any error",
     )  # fmt: skip
+    p = add(
+        "lease", around.cmd_lease, "say what you work on: take, release or list leases",
+        "lease take <what> [--minutes 60] [--note why]: hold <what> (free text like film/part-3, "
+        "service:<id>, space, work:<job>) so the others in the workspace see it in their around "
+        "and a second taker is refused; take it again to renew. lease release <what>; lease ls "
+        "(spec v3 §10)",
+    )  # fmt: skip
+    p.add_argument("action", choices=["take", "release", "ls"])
+    p.add_argument("what", nargs="?", help="what you hold, e.g. film/part-3 or service:<id>")
+    p.add_argument("--minutes", type=int, default=60, help="1 to 720 (default 60)")
+    p.add_argument("--note", help="why, for the others (at most 300 characters)")
+    p = add(
+        "note", around.cmd_note, "post or list the workspace's notes, decisions and asks",
+        'note post <topic> "<text>" [--kind info|decision|ask]: a note the others see (their '
+        "around says it); note ls [topic] [--since n_…|time] [--limit 20] (spec v3 §10)",
+    )  # fmt: skip
+    p.add_argument("action", choices=["post", "ls"])
+    p.add_argument("topic", nargs="?", help="what it is about, e.g. film/part-3")
+    p.add_argument("text", nargs="?", help="the note (post)")
+    p.add_argument("--kind", choices=["info", "decision", "ask"], default="info")
+    p.add_argument("--since", help="ls: after this note id or time")
+    p.add_argument("--limit", type=int, default=20, help="ls: at most this many (1-100)")
     p = add("result", cmd_result, "a finished job's outputs, fetched into <out>/<job>/")
     p.add_argument("job")
     p.add_argument("--out", default="out", help="default ./out")

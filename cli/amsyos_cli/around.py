@@ -325,3 +325,74 @@ def hook_lines(data: dict[str, Any], shown: dict[str, float]) -> tuple[list[str]
         more = len(fresh) - HOOK_LINES + 1
         fresh = [*fresh[: HOOK_LINES - 1], f"{more} more: amsyos around"]
     return fresh, keys
+
+
+LEASE_TAKE, LEASE_RELEASE, LEASE_LIST = "lease.take", "lease.release", "lease.list"
+NOTE_POST, NOTE_LIST = "note.post", "note.list"
+
+
+async def cmd_lease(args: argparse.Namespace, out: Out) -> int:
+    """`amsyos lease take|release|ls` (spec v3 §10): say what you are working on, so that
+    the others in the workspace see it (their `around`) and a second taker is refused."""
+    from amsyos_cli.api import Api  # noqa: PLC0415
+
+    if args.action != "ls" and not args.what:
+        raise CliError("INVALID_INPUT", f"amsyos lease {args.action} <what>: e.g. film/part-3")
+    async with Api(credentials(), out) as api:
+        if args.action == "take":
+            params: dict[str, Any] = {"what": args.what, "minutes": args.minutes}
+            if args.note:
+                params["note"] = args.note
+            data = await _ask(api, LEASE_TAKE, params)
+            out.emit(
+                data,
+                f"lease {args.what}: yours until {data.get('until') or '?'} "
+                "(others see it; take it again to renew, amsyos lease release to let it go)",
+            )
+        elif args.action == "release":
+            data = await _ask(api, LEASE_RELEASE, {"what": args.what})
+            out.emit(data, f"lease {args.what}: released")
+        else:
+            data = await _ask(api, LEASE_LIST, {})
+            leases = [obj(x) for x in seq(data.get("leases"))]
+            lines = [
+                f"{x.get('what')}: {x.get('holder')}"
+                + (" (yours)" if x.get("mine") else "")
+                + f", {x.get('minutes_left')} min left"
+                + (f": {clean(x.get('note'), 120)}" if x.get("note") else "")
+                for x in leases
+            ]
+            out.emit(data, *(lines or ["no lease in this workspace now"]))
+    return 0
+
+
+async def cmd_note(args: argparse.Namespace, out: Out) -> int:
+    """`amsyos note post <topic> <text> [--kind]` / `amsyos note ls [topic]` (spec v3 §10):
+    the workspace's shared notes, decisions and questions."""
+    from amsyos_cli.api import Api  # noqa: PLC0415
+
+    async with Api(credentials(), out) as api:
+        if args.action == "post":
+            if not args.topic or not args.text:
+                raise CliError(
+                    "INVALID_INPUT",
+                    'amsyos note post <topic> "<text>" [--kind info|decision|ask]',
+                )
+            data = await _ask(
+                api, NOTE_POST, {"topic": args.topic, "text": args.text, "kind": args.kind}
+            )
+            out.emit(data, f"note {data.get('note') or '?'} on {args.topic} ({args.kind})")
+        else:
+            params: dict[str, Any] = {"limit": args.limit}
+            if args.topic:
+                params["topic"] = args.topic
+            if args.since:
+                params["since"] = args.since
+            data = await _ask(api, NOTE_LIST, params)
+            lines = [
+                f"{n.get('at')} {n.get('by')} [{n.get('kind')}] {n.get('topic')}: "
+                + clean(n.get("text"), 300)
+                for n in (obj(x) for x in seq(data.get("notes")))
+            ]
+            out.emit(data, *(lines or ["no note"]))
+    return 0
