@@ -1113,7 +1113,8 @@ fn answer_with(ctx: &Ctx, id: &str, what: &str, by: &str, done: Result<String, S
 }
 
 /// TODO(review): isolation — actions from afar (sdk/NODE.md §5): `deploy`, `undeploy` (2.1.5)
-/// and `switch` only at `managed` or `full`, `as_node` only at `full`, `lower` only downwards.
+/// and `switch` only at `managed` or `full`, `as_node` only at `full`, `lower` only downwards;
+/// `log` (2.1.6) at any level, a job's log from the node's own `logs/` only.
 /// The level is read from the machine's own config.json at each action, never taken from the
 /// message.
 fn take_action(ctx: &Arc<Ctx>, v: &Value) {
@@ -1179,8 +1180,101 @@ fn take_action(ctx: &Arc<Ctx>, v: &Value) {
                 answer_with(&ctx, &id, &what, &by, done, more);
             });
         }
-        _ => answer(ctx, &id, &what, &by, Err("what: deploy, undeploy, switch or lower".into())),
+        "log" => {
+            // Node 2.1.6: a job's log, at any level: what the organisation's own job printed
+            // here (the kernel checks whose job it is; the node reads only its own logs/).
+            let (ctx, v) = (ctx.clone(), v.clone());
+            tokio::spawn(async move {
+                let (done, more) = match send_log(&ctx, &v).await {
+                    Ok((hint, more)) => (Ok(hint), more),
+                    Err(e) => (Err(e), Map::new()),
+                };
+                answer_with(&ctx, &id, &what, &by, done, more);
+            });
+        }
+        _ => answer(ctx, &id, &what, &by, Err("what: deploy, undeploy, switch, lower or log".into())),
     }
+}
+
+/// Node 2.1.6: what of a job's log goes up (its end; the Gateway bounds it again).
+const LOG_SEND_MAX: u64 = 5 << 20;
+
+/// Node 2.1.6: `log` (sdk/NODE.md §5): the log this node kept of a job (`logs/<job>.log`, the
+/// last 50 jobs, exec.rs `keep_log`), PUT to the Gateway's signed link, at most its last 5 MB.
+/// TODO(review): isolation — only a file of the node's own `logs/` folder, named by a job id
+/// (no path from the message), a plain file and never a link; only to a link of the
+/// Gateway's own origin under /upload/nodelog/. The kernel decides whose job it is.
+async fn send_log(ctx: &Arc<Ctx>, v: &Value) -> Result<(String, Map<String, Value>), String> {
+    let job = v.get("job").and_then(Value::as_str).filter(|j| util::is_job_id(j)).ok_or("job: a job id, j_…")?;
+    let put = v.get("put").and_then(Value::as_str).unwrap_or("");
+    let ok = Url::parse(put).is_ok_and(|u| same_origin(&u, &ctx.gateway) && u.path().starts_with("/upload/nodelog/"));
+    if !ok {
+        return Err(format!("put: a link of the Gateway {} under /upload/nodelog/", base(&ctx.gateway)));
+    }
+    if ctx.running.lock().map(|r| r.contains_key(job)).unwrap_or(false) {
+        return Err(format!("{job} runs here now: its log is kept when it ends (amsyos logs --follow shows what it prints)"));
+    }
+    let path = ctx.node_dir.join("logs").join(format!("{job}.log"));
+    let gone = || format!("this node no longer keeps the log of {job}: it keeps the logs of its last 50 jobs");
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_file() => {}
+        _ => return Err(gone()),
+    }
+    let (body, size, cut) = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64, u64), String> {
+        let mut f = open_plain(&path).map_err(|_| String::new())?;
+        let size = f.metadata().map_err(|e| e.to_string())?.len();
+        let cut = size.saturating_sub(LOG_SEND_MAX);
+        f.seek(SeekFrom::Start(cut)).map_err(|e| e.to_string())?;
+        let mut body = Vec::with_capacity((size - cut) as usize + 80);
+        std::io::Read::read_to_end(&mut std::io::Read::take(&mut f, LOG_SEND_MAX), &mut body).map_err(|e| e.to_string())?;
+        if cut > 0 {
+            // From the next whole line, after a note of what was left out.
+            let from = body.iter().position(|b| *b == b'\n').map_or(0, |i| i + 1);
+            let mut head = format!("[the first {cut} bytes of this log were left out: its end follows]\n").into_bytes();
+            head.extend_from_slice(&body[from..]);
+            body = head;
+        }
+        Ok((body, size, cut))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| if e.is_empty() { gone() } else { e })?;
+    let sent = body.len();
+    let resp = ctx
+        .http
+        .put(put)
+        .header(CONTENT_LENGTH, sent)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("could not send the log: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("the Gateway refused the log: HTTP {status}: {}", util::cut(&text, 200)));
+    }
+    let mut more = Map::new();
+    more.insert("size".into(), size.into());
+    more.insert("sent".into(), (sent as u64).into());
+    more.insert("cut".into(), (cut > 0).into());
+    Ok((format!("sent the log of {job} ({sent} bytes{})", if cut > 0 { ", its end" } else { "" }), more))
+}
+
+/// A file opened without following a link at its last step (Linux: O_NOFOLLOW).
+fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let f = opts.open(path)?;
+    if !f.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a plain file"));
+    }
+    Ok(f)
 }
 
 fn service_of(v: &Value) -> Result<String, String> {

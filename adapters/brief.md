@@ -23,9 +23,9 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   `<fill: ...>`; `card --help`: every key); a desk: `--type studio` (builds many services) or `work`
   (uses them). `card --check` (AMSYOS too) and `run --local` are free; MACHINE_TOO_SMALL: `deploy
   --dry-run`, `deploy [--channel stable]` on a rented or own node; `promote <service> <version>`;
-  `contract <gp_...|service|need>`: what a build must meet; `pool`: their runs, cost, disk; `uninstall
-  <service|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h] [--gpu none]|extend|close`.
-  A patch output: `amsyos result <job> --apply` names the files, then `git apply --3way`.
+  `contract <gp_...|service|need>`: what a build must meet; `pool`: runs, cost, disk; `compare <id>`:
+  two versions measured; `uninstall <id|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h]
+  [--gpu none]|extend|close`. A patch output: `amsyos result <job> --apply`, then `git apply --3way`.
 - Beside other agents: `note.post topic=<t>`, `note.list`; `lease.take what=<x>` while you change
   something, then `lease.release`. Wait: `amsyos watch --note <t>|--free <x>|--handover <ho_...>`.
 - Code together (other organisations too, via `repo.grant`): `amsyos repo setup`, then plain git;

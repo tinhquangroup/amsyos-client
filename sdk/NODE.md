@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.5)
+# AMSYOS Node, protocol 1 (node 2.1.6)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -8,7 +8,8 @@ allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no s
 2.1.2 puts the Python job module on every job's PYTHONPATH and keeps a server warm (§4).
 Node 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (§4).
 Node 2.1.5 removes a deployment from afar (`undeploy`, §5), frees the builds no deployment uses
-and says what each deployment holds of the disk (`disk`, §2 and §4).
+and says what each deployment holds of the disk (`disk`, §2 and §4). Node 2.1.6 sends the log
+it kept of a job when the kernel asks (`log`, §5).
 A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
 
@@ -306,6 +307,8 @@ with `as_node_default`.
 {"t": "action", "id": "x_…", "what": "undeploy", "by": "u_…", "service": "t_org.name.sub"}
 {"t": "action", "id": "x_…", "what": "switch", "by": "u_…", "service": "…", "on": true}
 {"t": "action", "id": "x_…", "what": "lower", "by": "u_…", "access": "services" | "managed"}
+{"t": "action", "id": "x_…", "what": "log", "by": "u_…", "job": "j_…",
+ "put": "https://…/upload/nodelog/<token>"}
 ```
 
 - **deploy** (level `managed` or `full`; `as_node` only at `full`):
@@ -338,6 +341,21 @@ with `as_node_default`.
   `full`; to a node that is offline it is kept (`node.list`: state `pending`) and sent after
   the node's next hello, again at each connection until the node answers; a node before 2.1.5
   is sent `switch` `on: false` instead.
+- **log** (2.1.6; any level): the log the node kept of a job (`logs/<job>.log` in its own folder,
+  §4: what its processes printed, at most 1 MB, the last 50 jobs). The node reads only that file,
+  named by the job id (never a path from the message), a plain file opened without following a
+  link, and `PUT`s at most its last 5 MB (cut at a whole line after a note of the bytes left
+  out) to `put`, a link of the Gateway's own origin under `/upload/nodelog/`, `Content-Type:
+  text/plain; charset=utf-8`. Its `done` adds `"size"` (the file's bytes), `"sent"` and
+  `"cut"`. A job running there now, or one it no longer keeps, is refused with a hint. The
+  kernel (`node.job_log {job}`, `amsyos logs j_… --full`) asks only for a job of the node's
+  own organisation that ran on that node (never a job of an order, nor a step under one), of
+  a caller who may see the job, while the node is online: an offline node is not asked later.
+  The link is signed for that job, that node and that action, lives 2 minutes and takes one
+  log; the Gateway takes it only for an open `log` action of that node about that job,
+  bounds it to 5 MB, keeps it as UTF-8 text without control characters (tab and newline
+  kept, a carriage return made a newline), and the kernel keeps it 7 days as a file of the
+  job's workspace and answers its URL, never the log.
 - **switch**: turns a service in `services.json` on or off (any service there).
 - **lower**: sets the level to the one named only if it is lower; otherwise it refuses.
 

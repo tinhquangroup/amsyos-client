@@ -41,6 +41,7 @@ from amsyos_cli.common import (
     session_ending,
     short,
 )
+from amsyos_cli.compare import cmd_compare
 from amsyos_cli.deploy import DEPLOY_NODE_HELP, check_card, check_of, deploy, dry_run, tenant_of
 from amsyos_cli.feedback import add_parser as add_feedback
 from amsyos_cli.feedback import logout_line
@@ -66,6 +67,7 @@ from amsyos_cli.jobs import (
     hide_left,
     parse_value,
     request_lines,
+    show_full_log,
     show_logs,
     show_result,
     space_closed,
@@ -556,6 +558,8 @@ async def cmd_cancel(args: argparse.Namespace, out: Out) -> int:
 
 async def cmd_logs(args: argparse.Namespace, out: Out) -> int:
     async with Api(credentials(), out) as api:
+        if args.full:
+            return await show_full_log(api, out, args.job, Path(args.out))
         return await show_logs(api, out, args.job, follow_it=args.follow)
 
 
@@ -1946,6 +1950,39 @@ def parser() -> Parser:
     p.add_argument("family", nargs="?", help="only this family: t_x.image, image or image.*")
 
     p = add(
+        "compare", cmd_compare,
+        "measure two versions of a service of yours, or two alike services, on the same "
+        "inputs: passed checks, time, credit, verdict",
+        "measure two versions of one service of yours, or two services with the same inputs "
+        "and outputs, on the same inputs (service.compare): each version's example, or "
+        "--inputs. The runs are quoted first (refused above --max-credit), run as ordinary "
+        "jobs of yours, waited for, and said as one table: per input whether each output "
+        "passed the service's checks, its time and credit, why it failed; totals; a verdict "
+        "and the next step (amsyos promote, amsyos uninstall --version)",
+    )  # fmt: skip
+    p.add_argument("service", nargs="?", help="t_x.name, or name (yours); name@1.2.0 pins a")
+    p.add_argument(
+        "--versions",
+        help="two versions, comma separated: 1.2.0,1.3.0 or stable,dev (default: stable and "
+        "dev when they differ, else the two newest kept)",
+    )  # fmt: skip
+    p.add_argument("--other", help="instead of --versions: a second service with the same inputs")
+    p.add_argument(
+        "--inputs",
+        help='JSON or @file: up to 3 params objects, [{"file": "asset://..."}] (default: the '
+        "examples)",
+    )  # fmt: skip
+    p.add_argument("--max-credit", type=float, help="refuse above this quote (default 1)")
+    p.add_argument(
+        "--external", action="store_true",
+        help="also compare a service that acts outside AMSYOS (each run acts there)",
+    )  # fmt: skip
+    p.add_argument("--dry-run", action="store_true", help="only the runs and their quote")
+    p.add_argument("--wait", type=int, default=600, help="seconds to wait for the runs (600)")
+    p.add_argument("--read", metavar="CMP", help="read an earlier compare (cmp_...)")
+    p.add_argument("--cancel", metavar="CMP", help="cancel the runs of a compare not yet ended")
+
+    p = add(
         "uninstall", cmd_uninstall,
         "take a service of yours, or a family (name.*), out completely: a dry run without --yes",
         "take a service of your organisation, or a whole family (t_x.image.* or image.*), out "
@@ -2076,6 +2113,11 @@ def parser() -> Parser:
     p = add("logs", cmd_logs, "a job's log, or what it printed last")
     p.add_argument("job")
     p.add_argument("-f", "--follow", action="store_true", help="follow it until the job ends")
+    p.add_argument(
+        "--full", action="store_true",
+        help="all it printed on an own node (node 2.1.6, its last 50 jobs): saved to <out>/<job>/",
+    )  # fmt: skip
+    p.add_argument("--out", default="out", help="with --full: where it lands (default ./out)")
 
     p = add(
         "discover", cmd_discover,
