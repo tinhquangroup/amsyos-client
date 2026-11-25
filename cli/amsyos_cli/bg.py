@@ -753,7 +753,7 @@ async def cmd_bg(args: argparse.Namespace, out: Out) -> int:
 
 
 async def cmd_start(args: argparse.Namespace, out: Out) -> int:
-    argv = [str(a) for a in seq(args.command)]
+    argv = [str(a) for a in seq(args.argv)]
     if argv[:1] == ["--"]:
         argv = argv[1:]
     if not argv:
@@ -1275,8 +1275,11 @@ def add_parsers(add: Any, common: argparse.ArgumentParser) -> dict[str, argparse
     ps.add_argument(
         "--out", metavar="PATH", help="a file or folder it writes: its size is progress"
     )
-    ps.add_argument(
-        "command", nargs=argparse.REMAINDER, help="-- then the command and its arguments"
+    ps.add_argument(  # not `command`: the top parser names the subcommand so (main.py)
+        "argv",
+        metavar="command",
+        nargs=argparse.REMAINDER,
+        help="-- then the command and its arguments",
     )
     pl = verbs.add_parser("ls", parents=[common], help="this run's tasks")
     pl.add_argument("--all", action="store_true", help="the workspace's tasks (at most 50)")
