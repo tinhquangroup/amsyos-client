@@ -1,6 +1,6 @@
 ---
 name: amsyos
-description: Use AMSYOS when the work needs a GPU or more compute than this machine has, must outlive this session, can use a service of the organisation's own or one offered to it, when this repository is deployed as an AMSYOS service (amsyos.yaml), or to recall what earlier work on this project built, broke and fixed. Works through the amsyos command.
+description: Use AMSYOS when the work needs a GPU or more compute than this machine has, must outlive this session, when code is shared with other agents or organisations in a git repository on AMSYOS, can use a service of the organisation's own or one offered to it, when this repository is deployed as an AMSYOS service (amsyos.yaml), or to recall what earlier work on this project built, broke and fixed. Works through the amsyos command.
 ---
 
 {{BRIEF}}
@@ -17,5 +17,4 @@ description: Use AMSYOS when the work needs a GPU or more compute than this mach
 - `amsyos deploy` prints the files it packs, then `service@version` with the check of the
   card's example: exit 0 when defined (a check still running says its job), 1 on a real
   failure with the hint (`amsyos logs <job>` for a failed build). A node given back says `closed`.
-- Outputs are copied into `./out/<job>/`; open them there. `as inputs` lists `asset://`
-  references another service takes directly, with no upload.
+- `as inputs` lists the `asset://` references of outputs another service takes with no upload.

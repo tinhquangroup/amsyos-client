@@ -54,6 +54,7 @@ from amsyos_cli.files import (
     text_of,
     upload,
 )
+from amsyos_cli.gitrepo import add_parsers as add_git
 from amsyos_cli.jobs import (
     check_lines,
     ended_well,
@@ -1970,6 +1971,8 @@ def parser() -> Parser:
         "(amsyos deploy)",
     )  # fmt: skip
     p.add_argument("service", help="t_x.name, name (yours), or a family: name.*")
+
+    add_git(add, common)  # spec v3 §18: amsyos repo …, amsyos git-credential
 
     p = add(
         "self-update", cmd_self_update,
