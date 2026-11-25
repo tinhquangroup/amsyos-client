@@ -65,8 +65,9 @@ undeploy, a deploy and at its start the node also removes the builds `amsyos dep
 hour nor while a `node.exec` runs, and says what each deployment holds of the disk
 (src/builds.rs, sdk/NODE.md §4).
 
-**A job's log (2.1.6).** The node keeps the log of its last 50 jobs (`logs/<job>.log` in its
-own folder, at most 1 MB each). `amsyos logs j_… --full` (the service `node.job_log`) asks for
+**A job's log (2.1.6).** The node keeps its jobs' logs (`logs/<job>.log` in its own folder, at
+most 1 MB each): the last 50 jobs', and since 2.1.7 every one of the last 7 days while they all
+stay within 500 MB and 10,000 files, the oldest removed first. `amsyos logs j_… --full` (the service `node.job_log`) asks for
 one: the node puts it, at most its last 5 MB, to a link the kernel signed, and the kernel keeps
 it as a file of the job's workspace. Only for the organisation's own job, at any level, while the
 node is online and still has it (src/net.rs, sdk/NODE.md §5).

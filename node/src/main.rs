@@ -6,7 +6,7 @@
 //! 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (mem.rs).
 //! 2.1.5 removes a deployment from afar (`undeploy`), frees the builds no deployment uses and
 //! says what each deployment holds of the disk (builds.rs). 2.1.6 sends a job's log it kept, when
-//! the kernel asks (`log`, net.rs).
+//! the kernel asks (`log`, net.rs). 2.1.7 keeps job logs 7 days (exec.rs `sweep_logs`).
 
 mod builds;
 mod config;
@@ -37,7 +37,7 @@ use serde_json::Value;
 use config::{Access, Config, Service, Services};
 
 const USAGE: &str = "\
-AMSYOS Node 2.1.6: this computer runs its organisation's services. Nothing dials into it.
+AMSYOS Node 2.1.7: this computer runs its organisation's services. Nothing dials into it.
 
   amsyos-node setup [--user <name>] [--jobs <folder>] [--services <folder>]
         once, as an administrator (Windows) or root (Linux: sudo), and again after each new

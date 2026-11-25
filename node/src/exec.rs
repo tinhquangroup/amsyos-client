@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -431,7 +431,7 @@ pub async fn execute(
     })
 }
 
-/// The job's log, kept in the node's own folder (`logs/<job>.log`), the last 50 jobs.
+/// The job's log, kept in the node's own folder (`logs/<job>.log`); how long: `sweep_logs`.
 pub fn keep_log(node_dir: &Path, id: &str, ended: &Ended) {
     let dir = node_dir.join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
@@ -446,13 +446,36 @@ pub fn keep_log(node_dir: &Path, id: &str, ended: &Ended) {
         ended.ran.as_secs_f64()
     );
     let _ = std::fs::write(dir.join(format!("{id}.log")), format!("{head}{}", ended.log));
-    let mut all: Vec<_> = std::fs::read_dir(&dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect())
-        .unwrap_or_default();
-    if all.len() > 50 {
-        all.sort();
-        for (_, p) in &all[..all.len() - 50] {
-            let _ = std::fs::remove_file(p);
+    sweep_logs(node_dir);
+}
+
+/// What the node keeps of its jobs' logs (2.1.7; the last 50 jobs before): the last 50 jobs'
+/// always, and any other of the last 7 days while all of them stay within 500 MB and 10,000
+/// files; the oldest go first. Swept after each job and when the node starts. Only plain
+/// `.log` files of `logs/`, never a link.
+pub fn sweep_logs(node_dir: &Path) {
+    const ALWAYS: usize = 50;
+    const DAYS: u64 = 7;
+    const BUDGET: u64 = 500 << 20;
+    const MOST: usize = 10_000;
+    let Ok(rd) = std::fs::read_dir(node_dir.join("logs")) else { return };
+    let mut all: Vec<(SystemTime, u64, PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.file_name().to_string_lossy().ends_with(".log"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    all.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    let now = SystemTime::now();
+    let (mut total, mut full) = (0u64, false);
+    for (i, (when, size, path)) in all.iter().enumerate() {
+        total += size;
+        full |= total > BUDGET || i >= MOST;
+        let old = now.duration_since(*when).is_ok_and(|age| age > Duration::from_secs(DAYS * 86_400));
+        if i >= ALWAYS && (old || full) {
+            let _ = std::fs::remove_file(path);
         }
     }
 }

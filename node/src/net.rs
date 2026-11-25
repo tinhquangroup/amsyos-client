@@ -343,6 +343,7 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         return Err("this machine has not joined yet: amsyos-node join <code> --gateway https://<host>".into());
     }
     util::log_to(node_dir.join("node.log"));
+    exec::sweep_logs(&node_dir); // 2.1.7: job logs older than 7 days (beyond the last 50)
     sys::preflight()?;
     let (dir, root, on) = (node_dir.clone(), cfg.jobs_root(), Services::load(&node_dir));
     tokio::task::spawn_blocking(move || crate::guard::guard(&dir, &root, &on)).await.map_err(|e| e.to_string())??;
@@ -1199,8 +1200,9 @@ fn take_action(ctx: &Arc<Ctx>, v: &Value) {
 /// Node 2.1.6: what of a job's log goes up (its end; the Gateway bounds it again).
 const LOG_SEND_MAX: u64 = 5 << 20;
 
-/// Node 2.1.6: `log` (sdk/NODE.md §5): the log this node kept of a job (`logs/<job>.log`, the
-/// last 50 jobs, exec.rs `keep_log`), PUT to the Gateway's signed link, at most its last 5 MB.
+/// Node 2.1.6: `log` (sdk/NODE.md §5): the log this node kept of a job (`logs/<job>.log`, 7 days
+/// and the last 50 jobs since 2.1.7, exec.rs `sweep_logs`), PUT to the Gateway's signed link, at
+/// most its last 5 MB.
 /// TODO(review): isolation — only a file of the node's own `logs/` folder, named by a job id
 /// (no path from the message), a plain file and never a link; only to a link of the
 /// Gateway's own origin under /upload/nodelog/. The kernel decides whose job it is.
@@ -1215,7 +1217,9 @@ async fn send_log(ctx: &Arc<Ctx>, v: &Value) -> Result<(String, Map<String, Valu
         return Err(format!("{job} runs here now: its log is kept when it ends (amsyos logs --follow shows what it prints)"));
     }
     let path = ctx.node_dir.join("logs").join(format!("{job}.log"));
-    let gone = || format!("this node no longer keeps the log of {job}: it keeps the logs of its last 50 jobs");
+    let gone = || {
+        format!("this node no longer keeps the log of {job}: it keeps job logs 7 days (at most 500 MB) and always the last 50 jobs'")
+    };
     match std::fs::symlink_metadata(&path) {
         Ok(m) if m.file_type().is_file() => {}
         _ => return Err(gone()),

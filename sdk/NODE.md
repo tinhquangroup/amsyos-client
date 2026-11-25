@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.6)
+# AMSYOS Node, protocol 1 (node 2.1.7)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -9,7 +9,7 @@ allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no s
 Node 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (§4).
 Node 2.1.5 removes a deployment from afar (`undeploy`, §5), frees the builds no deployment uses
 and says what each deployment holds of the disk (`disk`, §2 and §4). Node 2.1.6 sends the log
-it kept of a job when the kernel asks (`log`, §5).
+it kept of a job when the kernel asks (`log`, §5); 2.1.7 keeps job logs 7 days (§5 `log`).
 A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
 
@@ -342,7 +342,9 @@ with `as_node_default`.
   the node's next hello, again at each connection until the node answers; a node before 2.1.5
   is sent `switch` `on: false` instead.
 - **log** (2.1.6; any level): the log the node kept of a job (`logs/<job>.log` in its own folder,
-  §4: what its processes printed, at most 1 MB, the last 50 jobs). The node reads only that file,
+  §4: what its processes printed, at most 1 MB; the last 50 jobs, and from 2.1.7 also every
+  job of the last 7 days while all the logs stay within 500 MB and 10,000 files, the oldest
+  removed first, after each job and when the node starts). The node reads only that file,
   named by the job id (never a path from the message), a plain file opened without following a
   link, and `PUT`s at most its last 5 MB (cut at a whole line after a note of the bytes left
   out) to `put`, a link of the Gateway's own origin under `/upload/nodelog/`, `Content-Type:
