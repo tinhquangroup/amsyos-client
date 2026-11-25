@@ -26,9 +26,9 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   `contract <gp_...|service|need>`: what a build must meet; `pool`: runs, cost, disk; `compare <id>`:
   two versions measured; `uninstall <id|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h]
   [--gpu none]|extend|close`. A patch output: `amsyos result <job> --apply`, then `git apply --3way`.
-- Beside others: read `around:` lines (what they did) before you act on shared things. `amsyos around`:
-  who works on what; `amsyos status "<doing>"`: yours. `note.post topic=<t>`, `note.list`; `lease.take
-  what=<x>` while you change it, `lease.release`; `watch --note <t>|--free <x>|--handover <ho_...>`.
+- Beside others: read `around:` lines before you act on shared things; `amsyos around`, `status
+  "<doing>"`, `note.post|list`, `lease.take what=<x>`|`release`, `watch --note|--free|--handover`. Need
+  another machine or organisation: `amsyos ask <t_x|w_x> "<what>"`; answer: `amsyos reply <rq_…> "<text>"`.
 - Code together (other organisations too, via `repo.grant`): `amsyos repo setup`, then plain git;
   `repo create <n> --push|clone <repo>|pr --title ..|ls`; review, merge: `amsyos run repo.<verb>`.
 - Every error's `hint` is the next action (`--verbose`: what fell back). Never work around a refusal:

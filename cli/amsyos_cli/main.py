@@ -24,6 +24,7 @@ from amsyos_cli import patch as patches
 from amsyos_cli import setup as setups
 from amsyos_cli import update as updates
 from amsyos_cli.api import TERMINAL, Api, done, held_up, idempotency_key, refused_field
+from amsyos_cli.ask import add_parsers as add_ask
 from amsyos_cli.bg import add_parsers as add_bg
 from amsyos_cli.common import (
     CliError,
@@ -2024,6 +2025,7 @@ def parser() -> Parser:
     top.commands.update(add_bg(add, common))  # watched background tasks (2026-11-25)
     top.commands.update(add_later(add, common))  # checks set for later (2026-11-25)
     top.commands.update(add_secret(add, common))  # secrets kept out of the context (2026-11-25)
+    top.commands.update(add_ask(add, common))  # requests across organisations (2026-11-25)
 
     p = add(
         "self-update", cmd_self_update,

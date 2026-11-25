@@ -15,3 +15,7 @@ A check due later (a backup tonight, an error rate after a deploy): `amsyos late
 03:10` (or `--in 2h`); you are told in `around:` when it is due, then `amsyos later done <id>`. Never
 read `.env` or print a key: a person puts it in with `amsyos secret set NAME`, and you run with it:
 `amsyos secret run --env NAME -- <command>` (its output masked).
+
+Need something done by an AI client on another machine or in another organisation: `amsyos ask
+<t_x|w_x> "<what>"` (the first time, a manager there allows your organisation with `amsyos contact
+allow`); answers and requests to you arrive in `around:`; answer one with `amsyos reply <rq_…> "<text>"`.
