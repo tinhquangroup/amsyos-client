@@ -268,13 +268,22 @@ pub struct Ended {
     /// Node 2.1.2: a served job whose server ended before it said the job was done: what
     /// happened, in words ("the server ended while it did the job"); the job failed.
     pub broke: Option<String>,
+    /// Node 2.1.4: killed by the kernel's OOM killer, as the node found it (`mem::oom_note`).
+    pub oom: Option<String>,
 }
 
 impl Ended {
-    /// The end of stderr (of stdout when stderr is empty), at most 2000 characters.
+    /// The end of stderr (of stdout when stderr is empty), at most 2000 characters; after the
+    /// node's note when the job ran out of memory (2.1.4).
     pub fn said(&self) -> String {
         let text = if self.stderr.trim().is_empty() { &self.stdout } else { &self.stderr };
-        util::tail(text.trim_end(), SAID_MAX)
+        match &self.oom {
+            Some(oom) => {
+                let room = SAID_MAX.saturating_sub(oom.chars().count() + 1);
+                format!("{oom}\n{}", util::tail(text.trim_end(), room)).trim_end().to_string()
+            }
+            None => util::tail(text.trim_end(), SAID_MAX),
+        }
     }
 
     /// Ok when it succeeded; else (error, hint).
@@ -287,6 +296,9 @@ impl Ended {
         }
         if let Some(e) = read_error(jd) {
             return Err(e);
+        }
+        if let Some(oom) = &self.oom {
+            return Err(("SERVICE_ERROR".into(), oom.clone()));
         }
         if let Some(broke) = &self.broke {
             return Err(("SERVICE_ERROR".into(), self.why(broke)));
@@ -415,6 +427,7 @@ pub async fn execute(
         log: l.all.text(),
         ran,
         broke: None,
+        oom: None,
     })
 }
 

@@ -23,7 +23,7 @@ use tokio_tungstenite::Connector;
 
 use crate::config::{self, Access, Config, Service, Services};
 use crate::exec::{self, Limits};
-use crate::{folder, info, machine, pymod, serve, sys, util, warn};
+use crate::{folder, info, machine, mem, pymod, serve, sys, util, warn};
 
 const FRAME_MAX: usize = 64 << 10;
 const HINT_MAX: usize = 500;
@@ -913,6 +913,7 @@ async fn do_job(ctx: &Arc<Ctx>, job: &JobMsg, svc: &Service, cancel: watch::Rece
     if let Some(None) = job.exec {
         svc.dir = jd.dir.clone(); // node.exec without a cwd runs in the job's folder
     }
+    let kills = mem::Kills::now(); // 2.1.4: the OOM killer's counts, read by the node itself
     let ran = if job.exec.is_none() && svc.served().is_some() {
         // Node 2.1.2: through a server kept warm (serve.rs).
         let key = serve::key(&job.service, &job.version, job.as_node, job.serve_key.as_deref(), &svc, &job.limits);
@@ -928,13 +929,21 @@ async fn do_job(ctx: &Arc<Ctx>, job: &JobMsg, svc: &Service, cancel: watch::Rece
     } else {
         exec::execute(&jd, &svc, &job.limits, ctx.server, &ctx.node_dir, job.as_node, cancel.clone(), progress).await
     };
-    let ended = match ran {
+    let mut ended = match ran {
         Ok(e) => e,
         Err(e) => {
             cleanup(jd).await;
             return fail("SERVICE_ERROR", format!("the node could not start the service: {e}"), "");
         }
     };
+    if ended.exit == 137 && !ended.cancelled && !ended.timed_out {
+        let pool = ctx.pool.clone();
+        let warm = tokio::task::spawn_blocking(move || serve::idle_held(&pool)).await.ok().flatten();
+        ended.oom = mem::oom_note(ended.exit, &kills, (!job.as_node).then_some(job.limits.ram_gb), warm);
+        if let Some(oom) = &ended.oom {
+            warn!("job {id}: {oom}");
+        }
+    }
     exec::keep_log(&ctx.node_dir, id, &ended);
     if ended.cancelled {
         cleanup(jd).await;
@@ -960,7 +969,8 @@ async fn do_job(ctx: &Arc<Ctx>, job: &JobMsg, svc: &Service, cancel: watch::Rece
         }
         if ended.exit != 0 {
             cleanup(jd).await;
-            return with_exit(fail("SERVICE_ERROR", format!("the command exited with code {}", ended.exit), &said));
+            let hint = ended.oom.clone().unwrap_or_else(|| format!("the command exited with code {}", ended.exit));
+            return with_exit(fail("SERVICE_ERROR", hint, &said));
         }
     } else if let Err((error, hint)) = ended.judge(&jd, job.limits.max_runtime_s) {
         cleanup(jd).await;

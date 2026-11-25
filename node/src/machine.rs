@@ -65,7 +65,7 @@ pub fn probe(jobs_root: &Path) -> (Machine, Vec<Found>) {
         hostname: util::cut(&sys::hostname(), 60),
         version: env!("CARGO_PKG_VERSION").into(),
         cpus: cpus(),
-        ram_gb: round1(sys::ram_bytes() as f64 / (1u64 << 30) as f64),
+        ram_gb: round1(crate::mem::total_gb()), // 2.1.4: its cgroup's limit when lower
         disk_free_gb: disk_free_gb(jobs_root),
         gpus: gpus.join().unwrap_or_default(),
         software,

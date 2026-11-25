@@ -9,6 +9,7 @@ text block; an answer with `error` raises a `CliError` with the kernel's code an
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -31,6 +32,13 @@ for _name in ("httpx", "httpcore"):
 PROTOCOL = "2026-07-28"
 TERMINAL = frozenset({"succeeded", "failed", "cancelled"})
 WAIT_MAX_S = 50  # `wait_s` of run and status: at most 50 s (the owner, 2026-11-17)
+# A call refused with RATE_LIMITED (nothing was started) that may ask again this soon is
+# asked again, a few times and about a minute in all (a customer, 2026-11-25: every
+# service.define of a deploy refused "Ask again in 4 s", the image built, nothing defined).
+RATE_WAIT_MOST_S = 15
+RATE_WAIT_ALL_S = 60
+RATE_TRIES = 4
+_ASK_AGAIN = re.compile(r"Ask again in (\d+(?:\.\d+)?) s")
 
 
 def held_up(status: dict[str, Any]) -> bool:
@@ -134,7 +142,29 @@ class Api:
         )
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """One of the six tools; the answer's JSON, or a `CliError` with its code and hint."""
+        """One of the six tools; the answer's JSON, or a `CliError` with its code and hint.
+        A refusal for the rate with a short wait is waited out and asked again (bounded)."""
+        waited = 0.0
+        tries = 0
+        while True:
+            try:
+                return await self._call(tool, arguments)
+            except CliError as exc:
+                wait = _rate_wait(exc)
+                tries += 1
+                if (
+                    wait is None
+                    or wait > RATE_WAIT_MOST_S
+                    or tries > RATE_TRIES
+                    or waited + wait > RATE_WAIT_ALL_S
+                ):
+                    raise
+            what = arguments.get("service_id") or tool
+            self.out.note(f"{what}: RATE_LIMITED by AMSYOS: asking again in {wait:g} s")
+            await asyncio.sleep(wait + 0.5)  # the Gateway rounds its wait to whole seconds
+            waited += wait
+
+    async def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._client is None:
             raise RuntimeError("Api is used outside `async with`")
         self._ids += 1
@@ -162,6 +192,12 @@ class Api:
             raise self._unreachable(exc) from None
         if "error" in message:
             said: Any = message["error"]
+            data: Any = said.get("data") if isinstance(said, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            if isinstance(data, dict) and data.get("error") == "RATE_LIMITED":  # pyright: ignore[reportUnknownMemberType]
+                # The Gateway's limit on requests (HTTP 429), said as a JSON-RPC error.
+                after: Any = data.get("retry_after_s")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                hint = str(data.get("hint") or "")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                raise CliError("RATE_LIMITED", hint, {"retry_after_s": after})
             what = short(str(said.get("message") if isinstance(said, dict) else said), 300)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
             raise CliError("PROTOCOL", f"AMSYOS refused the call ({what}); amsyos is up to date?")
         result: Any = message.get("result") or {}
@@ -298,6 +334,18 @@ def _message(response: httpx.Response, wanted: int) -> dict[str, Any]:
     if not isinstance(told, dict):
         raise RuntimeError("an answer that is not a JSON object")
     return told  # pyright: ignore[reportUnknownVariableType]
+
+
+def _rate_wait(exc: CliError) -> float | None:
+    """The seconds a refusal for the rate asks to wait (`retry_after_s`, else its hint's
+    "Ask again in N s"); None for any other error."""
+    if exc.code != "RATE_LIMITED":
+        return None
+    after = exc.extra.get("retry_after_s")
+    if isinstance(after, int | float) and not isinstance(after, bool) and after >= 0:
+        return float(after)
+    found = _ASK_AGAIN.search(exc.hint)
+    return float(found[1]) if found else None
 
 
 def refused_field(exc: CliError, field: str) -> bool:

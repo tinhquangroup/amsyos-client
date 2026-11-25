@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.3)
+# AMSYOS Node, protocol 1 (node 2.1.4)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -6,6 +6,7 @@ How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The ke
 of at most 64 KiB. Nothing ever dials into the node. Node 2.1 adds the folders its person
 allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no such job. Node
 2.1.2 puts the Python job module on every job's PYTHONPATH and keeps a server warm (§4).
+Node 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (§4).
 A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
 
@@ -28,7 +29,9 @@ POST {gateway}/node/join
 or `4xx {"error": CODE, "hint": "what to do"}`. A code is used up only by a join that
 succeeds.
 
-`Machine` (bounded on the VPS; anything longer is cut):
+`Machine` (bounded on the VPS; anything longer is cut). `ram_gb` (2.1.4) is the lower of the
+machine's RAM and the limit of the node's own cgroup (a container, a systemd slice); `cpus`
+counts the CPUs the node may use (its cgroup's `cpu.max`, the CPUs it may run on):
 
 ```
 {"os": "windows" | "linux", "arch": "x86_64", "hostname": "PC2", "version": "2.0.0",
@@ -102,7 +105,7 @@ Node → Gateway, for a job it was sent:
 | `{"t": "state", "job": "j_…", "status": "running", "progress": 40}` | the `progress` file changed (at most every 2 s) |
 | `{"t": "state", "job": "j_…", "status": "refused", "hint": "…"}` | not started: the service is not switched on, no free slot, or a GPU job while the person uses the machine. Nothing ran; the kernel places it again |
 | `{"t": "state", "job": "j_…", "status": "succeeded", "outputs": {"<name>": "<name>.<ext>"}, "took_s": 1.4, "said": "…"}` | after every output file was put (below). `said`: the node's notes on out/ (files left out), and (2.1.3) when a job of a service left an output unmade, then the end of its stderr (stdout when stderr is empty); at most 2000 characters. The kernel fails a job that left a required output unmade, and keeps `said` and the files put as its `partial` |
-| `{"t": "state", "job": "j_…", "status": "failed", "error": "INVALID_PARAMS" \| "SERVICE_ERROR" \| "TIMEOUT", "hint": "…", "said": "<the end of stderr, at most 2000 characters>"}` | the run failed. Without `error.json`, the hint names the exit code and the line of stderr that says why (the last one naming an error, else the last one; stdout when stderr is empty). The kernel keeps `said` on the job (`amsyos.status` shows it), and any output put before, as `partial` |
+| `{"t": "state", "job": "j_…", "status": "failed", "error": "INVALID_PARAMS" \| "SERVICE_ERROR" \| "TIMEOUT", "hint": "…", "said": "<the end of stderr, at most 2000 characters>"}` | the run failed. Without `error.json`, the hint names the exit code and the line of stderr that says why (the last one naming an error, else the last one; stdout when stderr is empty). 2.1.4: a job killed (exit 137) while the kernel's OOM killer killed (the node's cgroup's `memory.events` `oom_kill`, or the machine's `/proc/vmstat`, read by the node before and after) has the hint, and the first line of `said`, "out of memory: … the machine's limit is N GB, the job's own M GB (limits.ram_gb); K idle warm server(s) held X GB then". The kernel keeps `said` on the job (`amsyos.status` shows it), and any output put before, as `partial` |
 | `{"t": "state", "job": "j_…", "status": "cancelled"}` | after a cancel |
 
 Gateway → node: `{"t": "cancel", "job": "j_…"}`. The node stops the job's whole process
@@ -161,7 +164,9 @@ The links are signed by the kernel for this job and this node only, and expire.
     language a loop on `amsyos-job next` … `amsyos-job done`, which reach the server's stdin
     and stdout through `$AMSYOS_SERVE_PID` (Linux, from any child) or their own, and keep the
     job now in `$AMSYOS_SERVE_STATE`. The server's own folder (its HOME and `tmp`) lies in
-    the jobs folder; it has no `$AMSYOS_JOB`;
+    the jobs folder; it has no `$AMSYOS_JOB`. Without `$AMSYOS_SERVE_STATE` (a job started
+    as a command), `serve()` fails the job at once (2.1.4: `SERVICE_ERROR`, "serve() runs only
+    in a server kept warm …") instead of ending with no output;
   - **who shares one** (TODO(review): isolation): one process serves one service version, one
     account (`amsyos-job`, or the node's own for a direct job as §5 says) and one
     `serve_key`, with the same folder, server command and `limits`. A job of an order never
@@ -169,8 +174,12 @@ The links are signed by the kernel for this job and this node only, and expire.
   - **limits**: a cold job's (`amsyos-job launch`: RLIMIT_DATA, its CPU share; the Job Object
     on Windows), with no CPU-time limit adding up over jobs: the node holds each job to its
     `max_runtime_s`. At most `slots` servers (2 at least), their declared memory within the
-    machine's; the idle one unused longest is stopped first, and with no room a job gets a
-    server of its own that ends with it;
+    node's (`ram_gb` above); the idle one unused longest is stopped first, and with no room a
+    job gets a server of its own that ends with it. 2.1.4: none stays idle while the memory
+    the node may still use (the machine's available memory, or what its cgroup's limit leaves)
+    is under a fifth of its memory (1 to 4 GB), measured, not declared: when a server is given
+    back after a job, at the reaper's sweep (every 15 s) and before a new server starts (which
+    also needs its declared memory free), idle ones stop, unused longest first;
   - **its end**: 10 idle minutes (the rented node's default), 100 jobs or an hour, its service
     switched off or deployed again, or the node stopping (its stdin closed, then killed after
     5 s). A job that fails (`error.json`, an exception in the handler) ends the job, not the

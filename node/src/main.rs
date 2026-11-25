@@ -3,6 +3,7 @@
 //! Named `amsyos-job`, the same program is the job contract's command. 2.1 reads the folders
 //! the person at the machine allowed, in place (spec v3 §8.3, folder.rs). 2.1.2 ships the
 //! Python job module on every job's PYTHONPATH (pymod.rs) and keeps servers warm (serve.rs).
+//! 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (mem.rs).
 
 mod config;
 mod deploy;
@@ -11,6 +12,7 @@ mod folder;
 mod guard;
 mod job;
 mod machine;
+mod mem;
 mod net;
 mod pymod;
 mod serve;
@@ -31,7 +33,7 @@ use serde_json::Value;
 use config::{Access, Config, Service, Services};
 
 const USAGE: &str = "\
-AMSYOS Node 2.1.3: this computer runs its organisation's services. Nothing dials into it.
+AMSYOS Node 2.1.4: this computer runs its organisation's services. Nothing dials into it.
 
   amsyos-node setup [--user <name>] [--jobs <folder>] [--services <folder>]
         once, as an administrator (Windows) or root (Linux: sudo), and again after each new
@@ -594,7 +596,7 @@ fn try_service(args: &[String]) -> Result<i32, String> {
     };
     let mut limits = exec::Limits {
         cpu: machine::cpus() as f64,
-        ram_gb: (sys::ram_bytes() as f64 / (1u64 << 30) as f64).max(1.0),
+        ram_gb: mem::total_gb().max(1.0),
         gpu: if svc.gpu { "optional".into() } else { "none".into() },
         ..Default::default()
     };
@@ -684,7 +686,8 @@ fn try_service(args: &[String]) -> Result<i32, String> {
     }
     println!("job {job_id}: {} in {}", svc.shown(), svc.dir.display());
     println!("job folder: {}", jd.dir.display());
-    let ended = runtime()?.block_on(async {
+    let kills = mem::Kills::now();
+    let mut ended = runtime()?.block_on(async {
         let (tx, rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
@@ -705,6 +708,9 @@ fn try_service(args: &[String]) -> Result<i32, String> {
             exec::execute(&jd, &svc, &limits, cfg.is_server(), &node_dir, as_node, rx, |p| println!("progress: {p}")).await
         }
     })?;
+    if !ended.cancelled && !ended.timed_out {
+        ended.oom = mem::oom_note(ended.exit, &kills, (!as_node).then_some(limits.ram_gb), None);
+    }
     exec::keep_log(&node_dir, &job_id, &ended);
     println!("exit code: {} (ran {:.1} s)", ended.exit, ended.ran.as_secs_f64());
     let verdict = if ended.cancelled {

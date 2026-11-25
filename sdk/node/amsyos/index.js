@@ -22,7 +22,9 @@
  *   const model = load();                    // once, not once a job
  *   serve(async (job) => { fs.writeFileSync(job.output("result", ".txt"), model(job.params.text)); });
  *
- * A served image several services share tells their jobs apart by `job.service`.
+ * `serve` runs only in a server kept warm (`serve:` in the card): in a job started as a
+ * command it fails the job at once, saying so. A served image several services share tells
+ * their jobs apart by `job.service`.
  *
  * Each job is a line on stdin and its end a line on stdout (what `serve` reads and
  * writes); what the handler prints goes to stderr, the job's log. `job.fail` ends only
@@ -36,6 +38,9 @@ const readline = require("readline");
 
 const LINE_MAX = 4096; // a line of the server's protocol, each way
 const JOB_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const NOT_SERVED =
+  "serve() runs only in a server kept warm: declare serve: in the card (serve: node " +
+  "server.js), or call your handler with job (handle(job)) under command:";
 
 class Failed extends Error {}
 
@@ -105,8 +110,20 @@ class Job {
   }
 
   /** Do the jobs the machine hands this process, one after the other, with
-   * `await handler(job)`, until the machine ends it. */
+   * `await handler(job)`, until the machine ends it. Only in a server kept warm, which the
+   * machine starts with $AMSYOS_SERVE_STATE: anywhere else stdin holds no job, so the job
+   * fails at once with NOT_SERVED instead of ending with no output. */
   async serve(handler) {
+    if (!process.env.AMSYOS_SERVE_STATE) {
+      if (process.env.AMSYOS_JOB) {
+        try {
+          const said = JSON.stringify({ error: "SERVICE_ERROR", hint: NOT_SERVED });
+          fs.writeFileSync(path.join(this.folder, "error.json"), said);
+        } catch {}
+      }
+      console.error(NOT_SERVED);
+      process.exit(1);
+    }
     // What the handler prints is its output (stderr), not the protocol (fd 1).
     process.stdout.write = process.stderr.write.bind(process.stderr);
     this._serving = true;

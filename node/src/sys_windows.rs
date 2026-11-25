@@ -116,6 +116,13 @@ pub fn ram_bytes() -> u64 {
     }
 }
 
+/// The physical memory available now (mem.rs).
+pub fn ram_free_bytes() -> Option<u64> {
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(m.ullAvailPhys)
+}
+
 pub fn disk_free_bytes(path: &Path) -> u64 {
     let mut free = 0u64;
     let p = wide(path);

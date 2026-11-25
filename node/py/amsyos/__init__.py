@@ -26,7 +26,9 @@ does the jobs one after the other, each in its own folder; `job` is the job now:
 
     serve(handle)                                  # returns when the machine ends it
 
-A served image several services share tells their jobs apart by `job.service`.
+`serve` runs only in a server kept warm (`serve:` in the card): in a job started as a
+command it fails the job at once, saying so. A served image several services share tells
+their jobs apart by `job.service`.
 
 Each job is a line on stdin and its end a line on stdout (what `serve` reads and
 writes): what the handler prints goes to stderr, the job's log. `job.fail` ends only the
@@ -52,6 +54,10 @@ from typing import Any, NoReturn, cast
 
 LINE_MAX = 4096  # a line of the server's protocol, each way
 _JOB_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+NOT_SERVED = (
+    "serve() runs only in a server kept warm: declare serve: in the card (serve: python "
+    "server.py), or call your handler with job (handle(job)) under command:"
+)
 
 
 class _Failed(Exception):  # noqa: N818 - how `fail` ends a job, not the server
@@ -120,7 +126,15 @@ class Job:
 
     def serve(self, handler: Callable[..., object]) -> None:
         """Do the jobs the machine hands this process, one after the other, with
-        `handler(job)` (or `handler()`), until the machine ends it."""
+        `handler(job)` (or `handler()`), until the machine ends it. Only in a server kept
+        warm, which the machine starts with $AMSYOS_SERVE_STATE: anywhere else stdin holds no
+        job, so the job fails at once with NOT_SERVED instead of ending with no output."""
+        if not os.environ.get("AMSYOS_SERVE_STATE"):
+            if os.environ.get("AMSYOS_JOB"):
+                with contextlib.suppress(OSError):
+                    said = {"error": "SERVICE_ERROR", "hint": NOT_SERVED}
+                    (self.folder / "error.json").write_text(json.dumps(said))
+            sys.exit(NOT_SERVED)
         protocol = os.fdopen(os.dup(1), "w", buffering=1)
         sys.stdout.flush()
         os.dup2(2, 1)  # what the handler prints is its output, not the protocol

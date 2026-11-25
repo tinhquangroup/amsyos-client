@@ -25,12 +25,14 @@ several), steps 4-5 are instead: build the environment and the image on that nod
 the command `sh _node/run.sh <image> '<command>'`, then `service.define` with `compute: node`,
 whose check runs the example there. `--dry-run` plans those steps; an own node costs nothing.
 The cards below the top one that name its image (`where: node` too) go with it: one build,
-then `node.deploy`, `service.define` and the check for each (`--only` picks some). The top
-card may be `where: space` (it deploys on the rented node; `--only` its own-node cards), or
-missing: cards side by side below a folder with none share its code (`--image` picks one
-image). When only cards changed since the node's image was built, there is no build: a card
-deployed there with the same command is only defined again, any other gets `node.deploy`
-from that image (`.amsyos/state/node.json` keeps what is on the node).
+then `node.deploy`, `service.define` and the check for each, a card at a time (the next once
+the previous card's check has ended; `--only` picks some). The top card may be `where:
+space` (it deploys on the rented node; `--only` its own-node cards), or missing: cards side
+by side below a folder with none share its code (`--image` picks one image); from one of
+their folders, deploy goes up to the highest folder with no card whose cards all name its
+image (`side_top`). When only cards changed since the node's image was built, there is no
+build: a card deployed there with the same command is only defined again, any other gets
+`node.deploy` from that image (`.amsyos/state/node.json` keeps what is on the node).
 
 Before anything is uploaded or built, AMSYOS's `service.check` (free) checks each card's
 spec, every problem of every card in one answer.
@@ -1159,15 +1161,17 @@ On an own node (the card's where: node; --node n_… when your organisation has 
 A Linux node; free. `from amsyos import job` needs AMSYOS Node {NODE_MIN} or later there.
 Cards that share one image: deploy in the top card's folder also takes every card below it
 (services/*/amsyos.yaml, any depth) that names the same image with where: node. One build,
-then steps 2-3 for each card, with its own name, version, inputs, outputs and tests; its
-command runs in the image's folder too (job.service tells them apart).
+then steps 2-3 for each card in turn (the next once the previous card's check has ended),
+with its own name, version, inputs, outputs and tests; its command runs in the image's
+folder too (job.service tells them apart).
 --only services/a,. deploys only those ('.' is the top card); deploy in a card's own
 folder deploys that card from the top one.
 A top card of where: space deploys on the rented node; --only <its own-node cards> builds
 those on the own node from its folder and build keys. No card at the top, cards side by
 side below it on one image (services/*/amsyos.yaml): the top folder is the image's, the
 cards agree on its runtime, system, packages, models and setup; --image <name> picks one
-image when they name several.
+image when they name several. From one of those cards' folders, deploy goes up to the
+highest folder with no card whose cards all name its image with where: node.
 No build when only cards changed since the node's image was built from these files: a
 card deployed there with the same command is defined again ("define only"), another gets
 node.deploy from that image; --force builds anyway (say, the image's folder was removed).
@@ -1512,9 +1516,8 @@ def _cards_below(
 
 def image_top(root: Path) -> Path | None:
     """The folder whose code a card of an own node (`where: node`) shares: the folder above
-    with a card that names the same image, whatever its `where`; else the repository's top
-    when it has no card and two cards or more below it name the image with `where: node`,
-    this one too (cards side by side). None when there is none."""
+    with a card that names the same image, whatever its `where`; else (cards side by side)
+    `side_top`. None when there is none."""
     try:
         card = cards.load(root)
     except CliError:
@@ -1535,12 +1538,49 @@ def image_top(root: Path) -> Path | None:
             continue
         if _named_image(up) == image:
             return folder
-    if top is None or top == root.resolve() or (top / cards.CARD).is_file():
+    return side_top(root.resolve(), top, image) if top is not None else None
+
+
+def side_top(here: Path, top: Path, image: str) -> Path | None:
+    """Cards side by side, none above naming the image (a customer, 2026-11-25: many
+    projects in one repository with no card at its top): the highest folder above `here`,
+    at or below the repository's `top`, with no card, every card below which names this
+    image with `where: node`, when two cards or more are below it. Never from a top card's
+    folder (a card below it names its image: it climbed to the repository's top and packed
+    every project). A card that cannot be read counts as another image's."""
+    above: list[Path] = []
+    for folder in list(here.parents)[:MOST_UP]:
+        if folder != top and top not in folder.parents:
+            break  # above the repository
+        if (folder / cards.CARD).is_file():
+            break  # another image's card (one of this image was found above)
+        above.append(folder)
+    if not above:
         return None
-    beside, _ = _cards_below(top, files_of(top))
-    sharing = [f for f, c in beside if _on_node(c) and _named_image(c) == image]
-    here = root.resolve().relative_to(top).as_posix()
-    return top if here in sharing and len(sharing) >= 2 else None
+    reach = above[-1]
+    listed = [
+        rel.removesuffix(f"/{cards.CARD}")
+        for rel in files_of(reach)
+        if rel.endswith(f"/{cards.CARD}")
+    ]
+    found, _ = _cards_below(reach, [f"{f}/{cards.CARD}" for f in listed])
+    at = here.relative_to(reach).as_posix() + "/"
+    if any(f.startswith(at) and _named_image(c) == image for f, c in found):
+        return None  # a top card's folder
+    mine = {f for f, c in found if _on_node(c) and _named_image(c) == image}
+    others = [f for f in listed if f not in mine]
+    best: Path | None = None
+    for folder in above:
+        below = folder.relative_to(reach).as_posix()
+        below = "" if below == "." else below + "/"
+        if any(f.startswith(below) for f in others):
+            break  # the folder holds other cards: those of another project
+        best = folder
+    if best is None:
+        return None
+    below = best.relative_to(reach).as_posix()
+    below = "" if below == "." else below + "/"
+    return best if sum(1 for f in mine if f.startswith(below)) >= 2 else None
 
 
 def from_top(out: Out, root: Path, only: list[str] | None) -> tuple[Path, list[str] | None]:
@@ -2142,9 +2182,9 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
         ]
         if multi:
             steps += [
-                "  2. for each card: node.deploy the package with its command (above)",
-                "  3. for each card: service.define its version with compute: node; its check "
-                "runs its example on the node",
+                "  2. for each card in turn: node.deploy the package with its command (above)",
+                "  3. then service.define its version with compute: node; its check runs its "
+                "example on the node, and the next card goes once that check has ended",
             ]
         else:
             steps += [
@@ -2160,8 +2200,9 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
             else []
         )
         steps.append(
-            f"  {len(steps) + 1}. service.define {'each' if len(todo) > 1 else 'it'} with "
-            "compute: node; its check runs its example on the node"
+            f"  {len(steps) + 1}. service.define {'each in turn' if len(todo) > 1 else 'it'} "
+            "with compute: node; its check runs its example on the node"
+            + (", and the next card goes once that check has ended" if len(todo) > 1 else "")
         )
     if todo:
         lines += steps
@@ -2332,9 +2373,9 @@ async def deploy_node(
             f"defined {e['service']}@{e['version']} (compute: node"
             + ("; define only)" if e["plan"] == DEFINE else ")")
         )
-    for e in todo:  # their checks run on the node meanwhile
-        if "error" in e:
-            continue
+        # service.define starts the check on the node: the next card is defined once this
+        # one's has ended (a customer, 2026-11-25: three checks at once each loaded one
+        # 1.2 GB model and the node ran out of memory).
         e["check"] = await _check(api, out, e["service"], e["version"])
         check_job = obj(e["check"]).get("job")
         if isinstance(check_job, str):

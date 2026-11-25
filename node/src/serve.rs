@@ -18,8 +18,11 @@
 //!   (an older kernel) is served by a process of its own that ends with it.
 //! - **Limits**: a process is held to the limits of a cold job (its memory, its CPU share);
 //!   the node holds each job to its `max_runtime_s`. At most `slots` processes (2 at least),
-//!   their declared memory within the machine's; the idle one unused longest is stopped first,
-//!   and with no room a job is served by a process of its own.
+//!   their declared memory within the node's (2.1.4: its cgroup's limit when lower, mem.rs);
+//!   the idle one unused longest is stopped first, and with no room a job is served by a
+//!   process of its own. 2.1.4: none stays idle while the memory the node may still use is
+//!   short (under `spare_gb`), measured, not declared: a process that did a job, the reaper's
+//!   sweep and a new process each stop idle ones, unused longest first, until it is not.
 //! - **Its end**: idle `IDLE_S` (the rented node's default, 10 minutes), after `MAX_JOBS` jobs
 //!   or `MAX_AGE_S`, when its service is switched off or deployed again, or with the node. A job
 //!   that fails (`error.json`, an exception) ends the job, not the process. A job cancelled or
@@ -41,7 +44,7 @@ use tokio::sync::{mpsc, watch};
 use crate::config::{Service, Services};
 use crate::exec::{self, Ended, JobDir, Launch, Limits, Logs};
 use crate::job::LINE_MAX;
-use crate::{info, sys, util, warn};
+use crate::{info, mem, sys, util, warn};
 
 pub const IDLE_S: u64 = 600;
 pub const MAX_JOBS: u32 = 100;
@@ -121,22 +124,59 @@ impl Pool {
         loop {
             let used = self.busy_ram + self.idle.iter().map(|w| w.ram_gb).sum::<f64>();
             if self.idle.len() + self.busy < self.cap && used + ram_gb <= self.ram_gb {
-                self.busy += 1;
-                self.busy_ram += ram_gb;
-                return (gone, true);
+                break;
             }
             let Some(i) = (0..self.idle.len()).min_by_key(|&i| self.idle[i].last) else { return (gone, false) };
             gone.push(self.idle.swap_remove(i));
         }
+        // 2.1.4: and the memory the node may really still use, for its declared memory and the
+        // spare.
+        let fits = self.shed(ram_gb + self.spare_gb(), &mut gone);
+        if fits {
+            self.busy += 1;
+            self.busy_ram += ram_gb;
+        }
+        (gone, fits)
     }
 
-    /// A process that did a job comes back (Some) or ends (None, its slot freed).
-    fn give_back(&mut self, warm: Option<Warm>, ram_gb: f64) {
+    /// A process that did a job comes back (Some) or ends (None, its slot freed). Gives back
+    /// the idle ones to stop because the node's memory is short (2.1.4), maybe this one.
+    fn give_back(&mut self, warm: Option<Warm>, ram_gb: f64) -> Vec<Warm> {
         self.busy = self.busy.saturating_sub(1);
         self.busy_ram = (self.busy_ram - ram_gb).max(0.0);
+        let mut gone = Vec::new();
         if let Some(w) = warm {
             self.idle.push(w);
+            self.shed(self.spare_gb(), &mut gone);
         }
+        gone
+    }
+
+    /// 2.1.4: what the node keeps free of its memory before a process stays warm: a fifth,
+    /// 1 to 4 GB.
+    fn spare_gb(&self) -> f64 {
+        (self.ram_gb / 5.0).clamp(1.0, 4.0)
+    }
+
+    /// 2.1.4: idle processes into `gone`, unused longest first, until the memory the node may
+    /// still use (`mem::free_gb`, measured) is at least `need` GB, each counted as giving back
+    /// what its processes hold (as measured, else its declared memory), and those in `gone`
+    /// already too. Whether it is then; true when the memory cannot be read.
+    fn shed(&mut self, need: f64, gone: &mut Vec<Warm>) -> bool {
+        let Some(mut free) = mem::free_gb() else { return true };
+        if free >= need {
+            return true;
+        }
+        let pids: Vec<u32> = gone.iter().chain(self.idle.iter()).map(|w| w.pid).collect();
+        let held: Vec<f64> = mem::trees_gb(&pids).into_iter().zip(gone.iter().chain(self.idle.iter())).map(|(m, w)| m.unwrap_or(w.ram_gb)).collect();
+        free += held[..gone.len()].iter().sum::<f64>();
+        let mut idle_held: Vec<f64> = held[gone.len()..].to_vec();
+        while free < need {
+            let Some(i) = (0..self.idle.len()).min_by_key(|&i| self.idle[i].last) else { break };
+            free += idle_held.swap_remove(i);
+            gone.push(self.idle.swap_remove(i));
+        }
+        free >= need
     }
 
     /// The idle processes to stop now: idle too long, ended, too old, or whose service is no
@@ -153,8 +193,22 @@ impl Pool {
                 i += 1;
             }
         }
+        let before = gone.len();
+        self.shed(self.spare_gb(), &mut gone);
+        if gone.len() > before {
+            info!("the node's memory is short: {} idle warm server(s) stopped", gone.len() - before);
+        }
         gone
     }
+}
+
+/// The idle servers kept warm now: how many, and the GB they hold (measured, else declared).
+/// Blocking (/proc), read outside the pool's lock.
+pub fn idle_held(pool: &Shared) -> Option<(usize, f64)> {
+    let idle: Vec<(u32, f64)> = pool.lock().ok()?.idle.iter().map(|w| (w.pid, w.ram_gb)).collect();
+    let pids: Vec<u32> = idle.iter().map(|(p, _)| *p).collect();
+    let held = mem::trees_gb(&pids).into_iter().zip(&idle).map(|(m, (_, declared))| m.unwrap_or(*declared)).sum();
+    Some((idle.len(), held))
 }
 
 fn fingerprint(svc: &Service) -> String {
@@ -359,7 +413,7 @@ impl Warm {
             Ok(h) => (h.logs.out.text(), h.logs.err.text(), h.logs.all.text()),
             Err(_) => Default::default(),
         };
-        Ended { pid: self.pid, exit, timed_out, cancelled, stdout, stderr, log, ran, broke }
+        Ended { pid: self.pid, exit, timed_out, cancelled, stdout, stderr, log, ran, broke, oom: None }
     }
 
     /// Asks it to end (its stdin closed), kills it after STOP_WAIT_S, removes its folder.
@@ -470,10 +524,15 @@ pub async fn execute(
                     (Some(_), Ok(mut p)) => p.room(limits.ram_gb),
                     _ => (Vec::new(), false),
                 };
-                for w in gone {
-                    info!("warm server of {} stopped to make room", w.shown());
-                    tokio::spawn(w.stop());
-                }
+                // Stopped before the new one loads, so their memory is free for it (2.1.4).
+                let stops: Vec<_> = gone
+                    .into_iter()
+                    .map(|w| {
+                        info!("warm server of {} stopped to make room", w.shown());
+                        w.stop()
+                    })
+                    .collect();
+                futures_util::future::join_all(stops).await;
                 fresh = true;
                 let (k, s, l, nd, jr) = (key.clone().unwrap_or_default(), svc.clone(), limits.clone(), node_dir.to_path_buf(), jobs_root.to_path_buf());
                 let made = tokio::task::spawn_blocking(move || Warm::start(k, &s, &l, server, &nd, &jr, as_node)).await.map_err(|e| e.to_string())?;
@@ -486,7 +545,7 @@ pub async fn execute(
                     Err(e) => {
                         if fits {
                             if let Ok(mut p) = pool.lock() {
-                                p.give_back(None, limits.ram_gb);
+                                let _ = p.give_back(None, limits.ram_gb);
                             }
                         }
                         return Err(format!("the server could not start: {e}"));
@@ -498,8 +557,10 @@ pub async fn execute(
         let ran = started.elapsed();
         let release = |w: Option<Warm>| {
             if held {
-                if let Ok(mut p) = pool.lock() {
-                    p.give_back(w, limits.ram_gb);
+                let gone = pool.lock().map(|mut p| p.give_back(w, limits.ram_gb)).unwrap_or_default();
+                for w in gone {
+                    info!("warm server of {} stopped: the node's memory is short", w.shown());
+                    tokio::spawn(w.stop());
                 }
             }
         };
