@@ -220,7 +220,15 @@ def config_dir() -> Path:
     TODO(review): OAuth — where the token file is read from and written to (mode 600)."""
     own = os.environ.get("AMSYOS_CONFIG_DIR")
     if own:
-        return Path(own)
+        path = Path(own).expanduser()
+        if not path.is_absolute():
+            # Relative to the folder this command runs in; written back absolute, so that a
+            # program it starts in another folder (a watched task's supervisor, a background
+            # sync) reads the same login (a desk's wrapper gave `./.amsyos-home/amsyos`, and its
+            # watched tasks could not beat: NOT_LOGGED_IN).
+            path = path.resolve()
+            os.environ["AMSYOS_CONFIG_DIR"] = str(path)
+        return path
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
     return Path(base) / "amsyos"
 

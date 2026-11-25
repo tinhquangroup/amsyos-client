@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from amsyos_cli import detach
-from amsyos_cli.common import CliError, Out, credentials, obj, seq, short
+from amsyos_cli.common import CliError, Out, config_dir, credentials, obj, seq, short
 from amsyos_cli.instance import instance_of
 from amsyos_cli.secret import env_specs, fetch, masked_pipe
 
@@ -831,6 +831,7 @@ async def cmd_start(args: argparse.Namespace, out: Out) -> int:
         "expect_s": expect_s, "quiet_after_s": quiet_after, "signals": {}, "exit": None,
     }  # fmt: skip
     _write(folder / STATE, state)
+    config_dir()  # a relative AMSYOS_CONFIG_DIR made absolute for the supervisor (common.py)
     started = detach.start(
         [sys.executable, "-m", "amsyos_cli.bg", SUPERVISE, str(folder)],
         cwd=folder, purpose="bg",
