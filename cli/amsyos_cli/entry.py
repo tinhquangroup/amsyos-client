@@ -5,7 +5,9 @@ the MCP client is loaded:
 - `amsyos sync --quiet` (SessionStart): the brief cached by the last sync written into the
   host's files, and a refresh started in a detached process (amsyos_cli/brief.py);
 - `amsyos work checkpoint --quiet` (PreCompact): a no-op until the session's checkpoint
-  needs it. Every other command, `work` included, runs in full.
+  needs it;
+- `amsyos around --hook` (UserPromptSubmit): at most once a minute, what others in the
+  workspace did (amsyos_cli/around.py). Every other command, `work` included, runs in full.
 """
 
 import contextlib
@@ -81,6 +83,10 @@ def main() -> int:
         return brief.quiet(Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()))
     if quiet and any(words[: len(hook)] == hook for hook in QUIET_NOOP):
         return 0
+    if words[:1] == ("around",) and "--hook" in args and not {"-h", "--help"} & set(args):
+        from amsyos_cli import around  # noqa: PLC0415 - light until it calls
+
+        return around.hook(Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()))
     from amsyos_cli.main import main as full  # noqa: PLC0415 - loaded only when needed
 
     return full()

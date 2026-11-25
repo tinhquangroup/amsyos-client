@@ -15,7 +15,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-from amsyos_cli import __version__, brief, repo, standards
+from amsyos_cli import __version__, around, brief, repo, standards
 from amsyos_cli import adapters as hosts
 from amsyos_cli import card as cards
 from amsyos_cli import local as local_run
@@ -498,6 +498,8 @@ def _instant(out: Out, started: dict[str, Any]) -> int:
 
 
 async def cmd_status(args: argparse.Namespace, out: Out) -> int:
+    if args.clear or not around.is_job(args.job):  # `status "<doing>"`: what you are doing
+        return await around.cmd_doing(args, out)
     async with Api(credentials(), out) as api:
         if args.wait:
             status = await follow(api, out, args.job)
@@ -2096,9 +2098,32 @@ def parser() -> Parser:
         type=float,
         help="seconds to wait at most (exit 3), default: as long as it takes",
     )
-    p = add("status", cmd_status, "a job's state; a parent job's steps")
-    p.add_argument("job")
+    p = add(
+        "status", cmd_status,
+        'a job\'s state and a parent job\'s steps (status j_…); or "<what you are doing>"',
+        "status j_…: a job's state, a parent job's steps. status \"<what you are doing>\" (at "
+        "most 120 characters): the one line others in this workspace see of you in amsyos "
+        "around, for 2 hours after your last call (session.status); --clear ends it",
+    )  # fmt: skip
+    p.add_argument("job", nargs="?", metavar="j_…|doing", help="a job, or what you are doing")
     p.add_argument("--wait", action="store_true", help="wait for its end, as long as it takes")
+    p.add_argument("--clear", action="store_true", help="end your status: nothing shown")
+    p = add(
+        "around", around.cmd_around, "who else works in this workspace now, and on what",
+        "who else works in this workspace now (status, leases held, jobs running), what others "
+        "did in the last 2 hours, and with --about who holds, changed or runs those services "
+        "or leases (session.around); others only, this workspace only. Every command's answer "
+        "may end with around: lines, what others did since you last saw (stderr; `around` in "
+        "--json); deploy, uninstall and promote first say who works on what they change",
+    )  # fmt: skip
+    p.add_argument(
+        "--about", metavar="X,Y", help="service ids or lease names, comma separated (at most 20)"
+    )
+    p.add_argument(
+        "--hook", action="store_true",
+        help="Claude Code's prompt hook: only what this project was not told yet, at most 5 "
+        "lines, at most once a minute; nothing on any error",
+    )  # fmt: skip
     p = add("result", cmd_result, "a finished job's outputs, fetched into <out>/<job>/")
     p.add_argument("job")
     p.add_argument("--out", default="out", help="default ./out")
@@ -2363,6 +2388,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         sys.stderr.write(f"stopped after {time.monotonic() - began:.0f}s\n")
         return 130
+    around.said(out)  # what others in the workspace did, after the command's own output
     said = getattr(args, "command", None) == "whoami" and code == 0  # whoami says it itself
     if told is not None and not out.json and not said:
         sys.stderr.write("".join(f"{line}\n" for line in updates.update_lines(told)))

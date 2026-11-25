@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from amsyos_cli import around
 from amsyos_cli.api import Api, idempotency_key
 from amsyos_cli.common import CliError, Out, credentials, obj, seq, short
 from amsyos_cli.deploy import tenant_of
@@ -195,6 +196,7 @@ async def cmd_promote(args: argparse.Namespace, out: Out) -> int:
         service = args.service
         if not service.startswith("t_"):
             service = f"{await tenant_of(api)}.{service}"
+        await around.warn(api, out, [service])  # who else works on it: a note, never a refusal
         asked = {"service": service, "version": args.version, "channel": args.channel}
         told = await _service(api, "service.promote", asked)
     out.emit(told, f"{service}: channel {args.channel} → {args.version}")

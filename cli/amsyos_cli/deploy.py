@@ -61,8 +61,8 @@ from typing import Any
 
 import httpx
 
+from amsyos_cli import around, repo
 from amsyos_cli import card as cards
-from amsyos_cli import repo
 from amsyos_cli.api import Api, idempotency_key, refused_field
 from amsyos_cli.common import CliError, Credentials, Out, amount, obj, seq, short
 from amsyos_cli.files import fetch_text, held, human, sha256_of, upload
@@ -831,6 +831,7 @@ async def deploy(
             answer["bare_runs"] = runs
         out.emit(answer, f"{service_id}@{current}: nothing changed (--force builds again)", *said)
         return 0
+    await around.warn(api, out, [service_id])  # who else works on it: a note, never a refusal
     version = next_version(str(card["version"]), current)
     wrong = await checked_problems(api, [{"dir": ".", "card": card, "examples": root}], None)
     if wrong:  # before anything is uploaded or rented
@@ -2281,6 +2282,7 @@ async def deploy_node(
             _problem_code(problems), "; ".join(problems + ready),
             {"node": node_id, "problems": problems + ready},
         )  # fmt: skip
+    await around.warn(api, out, [str(e["service"]) for e in todo])  # a note, never a refusal
     if deploying:
         for line in file_lines({**made, "archive": package}, every=False):
             out.note(line)

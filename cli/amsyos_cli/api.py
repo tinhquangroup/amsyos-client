@@ -5,6 +5,8 @@ session's bearer token, the protocol's headers and `_meta` as the MCP Python SDK
 (`mcp==2.3.0`) sends them, and no handshake, no `tools/list`: the CLI talks to AMSYOS only,
 and importing the SDK cost every command about 1.5 s (bench T4). Each tool answers one JSON
 text block; an answer with `error` raises a `CliError` with the kernel's code and hint.
+An answer's `around` (what others in the workspace did) is taken out of it and said after the
+command's own output (amsyos_cli/around.py).
 """
 
 from __future__ import annotations
@@ -22,8 +24,9 @@ from typing import Any
 
 import httpx
 
-from amsyos_cli import __version__, repo
+from amsyos_cli import __version__, around, repo
 from amsyos_cli.common import CliError, Credentials, Out, short
+from amsyos_cli.login import instance_of
 
 # The SDK logs what it falls back from; the reader wants answers, not that.
 for _name in ("httpx", "httpcore"):
@@ -97,6 +100,8 @@ class Api:
                 headers={
                     "Authorization": f"Bearer {self.creds.token}",
                     "User-Agent": f"amsyos-cli/{__version__}",
+                    # Presence only: which run of a coding agent calls (login.instance_of).
+                    **({"X-Amsyos-Instance": inst} if (inst := instance_of()) else {}),
                 },
                 # A call may hold for `wait_s` (50 s) before it answers.
                 timeout=httpx.Timeout(30.0, read=WAIT_MAX_S + 40.0),
@@ -214,6 +219,7 @@ class Api:
         if not isinstance(answer, dict):
             raise CliError("BAD_ANSWER", f"AMSYOS answered {tool} with no JSON object")
         told: dict[str, Any] = answer  # pyright: ignore[reportUnknownVariableType]
+        around.take(self.out, told)  # said after the command's own output, or in --json
         if "error" in told:
             extra = {k: v for k, v in told.items() if k not in {"error", "hint"}}
             raise CliError(str(told["error"]), str(told.get("hint") or ""), extra)

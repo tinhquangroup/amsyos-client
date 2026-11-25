@@ -21,6 +21,7 @@ import argparse
 import sys
 from typing import Any
 
+from amsyos_cli import around
 from amsyos_cli.api import Api, refused_field
 from amsyos_cli.common import CliError, Out, amount, credentials, obj, seq, short
 from amsyos_cli.deploy import tenant_of
@@ -226,6 +227,7 @@ def removal_lines(data: dict[str, Any], service: str, *, done: bool) -> list[str
 async def cmd_uninstall(args: argparse.Namespace, out: Out) -> int:
     async with Api(credentials(), out) as api:
         service = await _own(api, args.service)
+        await around.warn(api, out, [service])  # who else works on it: a note, never a refusal
         asked: dict[str, Any] = {"service": service}
         if args.version:
             asked["version"] = args.version
