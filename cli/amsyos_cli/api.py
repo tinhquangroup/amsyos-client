@@ -26,7 +26,7 @@ import httpx
 
 from amsyos_cli import __version__, around, repo
 from amsyos_cli.common import CliError, Credentials, Out, short
-from amsyos_cli.login import instance_of
+from amsyos_cli.instance import instance_of
 
 # The SDK logs what it falls back from; the reader wants answers, not that.
 for _name in ("httpx", "httpcore"):

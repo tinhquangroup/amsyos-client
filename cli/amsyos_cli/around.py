@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from amsyos_cli import brief, repo
 from amsyos_cli.common import CliError, Out, credentials, gateway_default, obj, seq, short
+from amsyos_cli.instance import instance_of
 
 if TYPE_CHECKING:
     from amsyos_cli.api import Api
@@ -262,10 +263,16 @@ async def _hook_lines(start: Path) -> list[str]:
     root = brief.root_of(start.resolve())
     if root is None:  # a folder `amsyos init` never bound: nothing to say, nothing written
         return []
-    gateway = gateway_default()
-    state = _read_hook_state(root / repo.STATE_DIR / HOOK_STATE)
-    mine = obj(state.get(gateway))
+    # One mark a Gateway and run of a coding agent: two sessions in one folder each see the
+    # news once (instance.instance_of); marks older than `HOOK_KEEP_S` are dropped.
+    gateway = f"{gateway_default()}#{instance_of() or ''}"
     now = time.time()
+    state = {
+        k: v
+        for k, v in _read_hook_state(root / repo.STATE_DIR / HOOK_STATE).items()
+        if isinstance(at := obj(v).get("at"), int | float) and now - at < HOOK_KEEP_S
+    }
+    mine = obj(state.get(gateway))
     last = mine.get("at")
     if isinstance(last, int | float) and 0 <= now - last < HOOK_EVERY_S:
         return []
