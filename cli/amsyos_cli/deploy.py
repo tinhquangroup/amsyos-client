@@ -2331,7 +2331,9 @@ async def deploy_node(
         answer["made"] = ".amsyos/"
     began = time.monotonic()
     if build_now:
-        made_on_node, lines = await _node_exec(api, out, creds, node_id, asset, answer)
+        made_on_node, lines = await _node_exec(
+            api, out, creds, node_id, asset, answer, str(build["env"])
+        )
         if made_on_node is None:
             out.emit(answer, *lines)
             return 1
@@ -2499,13 +2501,21 @@ def _remember_cards(  # noqa: PLR0917 - the deploy's state, passed on
 
 
 async def _node_exec(  # noqa: PLR0917 - the deploy's state, passed on
-    api: Api, out: Out, creds: Credentials, node_id: str, asset: str, answer: dict[str, Any]
+    api: Api,
+    out: Out,
+    creds: Credentials,
+    node_id: str,
+    asset: str,
+    answer: dict[str, Any],
+    env: str,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """The build on the node (node.exec of `_node/build.py`), followed to its end: what it
-    made (`out/build.json`), or None and the lines that say why not."""
-    params = {
+    made (`out/build.json`), or None and the lines that say why not. `cache_env` names the
+    environment it builds: the kernel hands the build its organisation's cached copies
+    (the environment, and the image by the package) and where to keep what it makes."""
+    params: dict[str, Any] = {
         "node": node_id, "command": NODE_EXEC, "timeout_s": NODE_EXEC_S, "file1": asset,
-        "outputs": "build",
+        "outputs": "build", "cache_env": env,
     }  # fmt: skip
     began = time.monotonic()
     started = await api.run(
@@ -2537,8 +2547,19 @@ async def _node_exec(  # noqa: PLR0917 - the deploy's state, passed on
             lines.append(NODE_UPDATE)
         lines.append(f"its log: amsyos logs {job_id}")
         return None, lines
-    how = "taken as it was" if built.get("env_reused") else "made"
-    out.note(f"built in {took}s: environment {built.get('env')} {how} (log: amsyos logs {job_id})")
+    cached = obj(built.get("cache"))
+    env_said, image_said = obj(cached.get("env")), obj(cached.get("image"))
+    how = (
+        "taken from your build cache" if env_said.get("restored")
+        else "taken as it was" if built.get("env_reused") else "made"
+    )  # fmt: skip
+    bits = [f"environment {built.get('env')} {how}"]
+    if image_said.get("restored"):
+        bits.append("image taken from your build cache (setup not run again)")
+    kept = [n for n, said in (("environment", env_said), ("image", image_said)) if said.get("kept")]
+    if kept:
+        bits.append(f"{' and '.join(kept)} kept in your build cache for your next machine")
+    out.note(f"built in {took}s: {'; '.join(bits)} (log: amsyos logs {job_id})")
     return built, []
 
 

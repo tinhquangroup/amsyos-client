@@ -2,7 +2,7 @@
 # served by the Gateway under /cli/, installed with `uvx --from <that URL> amsyos install`.
 [project]
 name = "amsyos-cli"
-version = "0.5.11"
+version = "0.5.13"
 description = "The amsyos command: AMSYOS from a terminal or an AI coding agent, over the six MCP tools"
 requires-python = ">=3.11"
 # Open source under Apache-2.0 (the owner, 2026-11-21): the CLI, the job SDK, AMSYOS Node and
