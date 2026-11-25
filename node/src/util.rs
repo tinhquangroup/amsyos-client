@@ -45,7 +45,12 @@ macro_rules! warn {
 
 /// `2026-11-18T10:04:05Z`.
 pub fn now_utc() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    utc_of(SystemTime::now())
+}
+
+/// A time as `2026-11-18T10:04:05Z`.
+pub fn utc_of(t: SystemTime) -> String {
+    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (days, rest) = ((secs / 86400) as i64, secs % 86400);
     // Howard Hinnant's civil_from_days.
     let z = days + 719_468;

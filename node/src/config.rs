@@ -269,11 +269,19 @@ pub struct Service {
     /// `as_node`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub as_job: bool,
+    /// Node 2.1.5: when a deploy put it here (the `disk` message's `since`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
 }
 
 impl Service {
     pub fn new(dir: PathBuf, command: String, gpu: bool) -> Service {
-        Service { dir, command, serve: None, gpu, on: true, managed: false, by: None, sha256: None, as_node: false, as_job: false }
+        Service { dir, command, serve: None, gpu, on: true, managed: false, by: None, sha256: None, as_node: false, as_job: false, since: None }
+    }
+
+    /// Its command and server, as lines (what names a build's image, builds.rs).
+    pub fn lines(&self) -> Vec<String> {
+        std::iter::once(self.command.clone()).chain(self.serve.clone()).filter(|l| !l.trim().is_empty()).collect()
     }
 
     /// The server's command, when the service has one.

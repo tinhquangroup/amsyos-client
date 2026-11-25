@@ -643,6 +643,24 @@ pub async fn stop_all(pool: &Shared) {
     }
 }
 
+/// Node 2.1.5: the idle servers of one service, stopped (its undeploy). A busy one ends after
+/// its job: the sweep finds its service gone. How many were stopped.
+pub async fn stop_service(pool: &Shared, service: &str) -> usize {
+    let gone: Vec<Warm> = pool
+        .lock()
+        .map(|mut p| {
+            let (mine, rest): (Vec<Warm>, Vec<Warm>) = std::mem::take(&mut p.idle).into_iter().partition(|w| w.service == service);
+            p.idle = rest;
+            mine
+        })
+        .unwrap_or_default();
+    let n = gone.len();
+    for w in gone {
+        w.stop().await;
+    }
+    n
+}
+
 /// The folders of servers an earlier run of the node left (it was stopped at once).
 pub fn clean_left(jobs_root: &Path) {
     let Ok(rd) = std::fs::read_dir(jobs_root) else { return };

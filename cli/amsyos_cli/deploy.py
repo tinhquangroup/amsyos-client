@@ -1141,6 +1141,8 @@ NODE_KIT = Path(__file__).resolve().parent / "nodekit"  # what runs on the node 
 NODE_MIN = "2.1.2"  # the AMSYOS Node that gives every job the `amsyos` Python module
 NODE_EXEC_S = 3600  # node.exec's longest: the environment, the models and setup
 NODE_COMMAND_MOST = 900  # node.deploy's command
+# What node.deploy says (node 2.1.5) when the build a command names was freed from the node.
+BUILD_GONE = "is not on this machine (removed"
 NODE_DIR = "_node"  # where the package carries the build and the run of an own node
 NODE_EXEC = (
     f"python3 -m zipfile -e in/file1.zip src && python3 src/{NODE_DIR}/build.py in/file1.zip src"
@@ -2362,6 +2364,16 @@ async def deploy_node(
                 params["source"] = json.dumps(source, separators=(",", ":"))
             e["defined"] = await api.instant("service.define", params)
         except CliError as exc:
+            if not build_now and e["plan"] == DEPLOY and BUILD_GONE in exc.hint:
+                # Node 2.1.5 frees a build no deployment uses (an hour after it was made):
+                # nothing was deployed from it yet in this run, so build it again.
+                out.note(
+                    f"{image_dir} is no longer on node {node_id} (no deployment used it): "
+                    "building again"
+                )
+                return await deploy_node(
+                    api, out, creds, root, made, node=node, force=True, channel=channel, only=only
+                )
             e["error"] = exc.answer()
             if not multi:
                 e["ok"] = False

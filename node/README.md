@@ -58,6 +58,13 @@ hour, or when its service changes. A failing job ends the job, not the server; a
 ends before it takes its job falls back to `--command`; one that ends while it does the job
 fails that job (src/serve.rs).
 
+**Undeploy and builds (2.1.5).** `node.undeploy` (a manager, the node at `managed` or `full`)
+removes what a deploy put here: the service's warm servers, its entry and its folder. After an
+undeploy, a deploy and at its start the node also removes the builds `amsyos deploy` made under
+`~/amsyos-build` (or `AMSYOS_BUILD_HOME`) that no deployment uses, never one younger than an
+hour nor while a `node.exec` runs, and says what each deployment holds of the disk
+(src/builds.rs, sdk/NODE.md §4).
+
 `run` and `try` refuse SYSTEM and root, and an elevated Windows process unless
 `--allow-elevated` (a Windows with UAC off has no other kind). Each job runs as `amsyos-job`
 in a folder of its own, held by a Job Object (Windows) or rlimits and cgroups (Linux); the

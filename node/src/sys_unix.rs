@@ -84,7 +84,7 @@ fn sudo_job(args: &[&str]) -> Command {
     cmd
 }
 
-fn group_id(name: &str) -> Option<u32> {
+pub fn group_id(name: &str) -> Option<u32> {
     let groups = std::fs::read_to_string("/etc/group").ok()?;
     groups.lines().find_map(|l| {
         let mut f = l.split(':');

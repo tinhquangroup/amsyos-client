@@ -75,6 +75,7 @@ from amsyos_cli.jobs import (
 )
 from amsyos_cli.login import host_of, login
 from amsyos_cli.overview import overview, session_show
+from amsyos_cli.pool import cmd_pool, cmd_restore, cmd_uninstall
 from amsyos_cli.shell import cli_hint, quoted
 from amsyos_cli.space import cmd_node
 from amsyos_cli.watch import cmd_watch
@@ -1930,6 +1931,45 @@ def parser() -> Parser:
     p.add_argument("service", help="t_x.name, or name (your organisation's)")
     p.add_argument("version", help="e.g. 1.0.3")
     p.add_argument("--channel", choices=["dev", "stable"], default="stable")
+
+    p = add(
+        "pool", cmd_pool,
+        "your organisation's own services by family: where each runs, version, check, and over "
+        "30 days runs, failures, median time, credit, last run, disk",
+        "your organisation's own services by family (service.pool): where each runs, the "
+        "version a bare id runs and its check, and over the last 30 days its runs, failure "
+        "share, median time, credit spent and last run, and the disk it holds on own nodes. "
+        "A manager sees the organisation's figures, anyone else the workspace's. Judge what "
+        "is efficient, then amsyos uninstall what is not",
+    )  # fmt: skip
+    p.add_argument("family", nargs="?", help="only this family: t_x.image, image or image.*")
+
+    p = add(
+        "uninstall", cmd_uninstall,
+        "take a service of yours, or a family (name.*), out completely: a dry run without --yes",
+        "take a service of your organisation, or a whole family (t_x.image.* or image.*), out "
+        "of its pool completely (service.remove): its versions and channels, its code, "
+        "environment and warm servers on own nodes, its skills. Without --yes a dry run says "
+        "everything that would go and the disk it frees; nothing is removed while anything "
+        "outside it still uses it (each user is listed with its fix). Undo for 7 days: "
+        "amsyos restore. --version removes one version only (final)",
+    )  # fmt: skip
+    p.add_argument("service", help="t_x.name, name (yours), or a family: name.*")
+    p.add_argument("--version", help="only this version (e.g. a beta beside stable); final")
+    p.add_argument(
+        "--with-image", action="store_true",
+        help="a service of the rented node: forget its kept image too",
+    )  # fmt: skip
+    p.add_argument("--yes", action="store_true", help="remove it now (without: a dry run)")
+
+    p = add(
+        "restore", cmd_restore,
+        "bring back a service or family removed in the last 7 days",
+        "bring back a service or family removed in the last 7 days (service.restore): its "
+        "definitions, versions and channels; a service of an own node is deployed again "
+        "(amsyos deploy)",
+    )  # fmt: skip
+    p.add_argument("service", help="t_x.name, name (yours), or a family: name.*")
 
     p = add(
         "self-update", cmd_self_update,

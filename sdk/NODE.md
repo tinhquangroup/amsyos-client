@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.4)
+# AMSYOS Node, protocol 1 (node 2.1.5)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -7,6 +7,8 @@ of at most 64 KiB. Nothing ever dials into the node. Node 2.1 adds the folders i
 allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no such job. Node
 2.1.2 puts the Python job module on every job's PYTHONPATH and keeps a server warm (§4).
 Node 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (§4).
+Node 2.1.5 removes a deployment from afar (`undeploy`, §5), frees the builds no deployment uses
+and says what each deployment holds of the disk (`disk`, §2 and §4).
 A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
 
@@ -71,6 +73,23 @@ jitter).
    - `load`: the machine's CPU use, 0 to 1.
    - `folders` (2.1): the names of the folders its person allowed (§6), at most 32, each
      `^[a-z][a-z0-9_-]{0,39}$`; never a path. Anything else in the list is left out.
+5. Node → (2.1.5) after it starts and whenever it changed, measured at most every 10 minutes
+   (and a minute after a deploy or an undeploy; a walk of a big folder costs):
+   ```
+   {"t": "disk", "builds_gb": 2.3,
+    "deployed": {"t_org.image.thumb": {"gb": 1.4, "image": "thumb@1.2.0",
+                                       "since": "2026-11-25T10:00:00Z"}}}
+   ```
+   - `deployed`: each service a deploy put here (§5): `gb`, what removing it frees (its
+     folder, and the build's image it runs from; an image several services share is counted
+     for each, as `image` says; a file with another hard link frees nothing and is not
+     counted); `image`, the image folder's name (empty for a deployment with none); `since`,
+     when it was deployed.
+   - `builds_gb`: the image folders and environments no deployment uses (§4 "Builds"): what
+     the next cleaning removes once they are an hour old.
+   The Gateway keeps both in the node's `machine` (`deployed` only for the node's own
+   organisation's services, at most 200; sizes bounded), across hellos, and shows them; it
+   believes none of it for anything else.
 
 ### Jobs
 
@@ -155,6 +174,26 @@ The links are signed by the kernel for this job and this node only, and expire.
   `setup`, so the system's programs keep their own libraries: a pip wheel's program that needs
   a library of the card's `system` (Chromium: nss, gbm) is started with
   `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`.
+- **Builds (2.1.5).** `amsyos deploy` builds as the node's own account (`node.exec`) under
+  `AMSYOS_BUILD_HOME`, by default `~/amsyos-build`: `images/<image>@<version>/` (its
+  `_node/where.env` names its environment, `ENV_DIR=…/envs/<key>`), `envs/<key>/`, and `hf/`,
+  `fetched/`, `mamba/`, `tools/`. Each deployment's command and serve are `sh _node/run.sh
+  <image folder> '<command>'`. After an undeploy, after a deploy and when it starts, the node
+  (with `AMSYOS_BUILD_HOME` or `HOME` as its own environment says them) removes:
+  - each folder of `images/` that holds `_node/where.env` and that no service of
+    `services.json` (on or off) nor a job running now names in its command or serve;
+  - then each folder of `envs/` (one with `conda-meta/` or `.ready`) that no image folder left
+    names (nor one a command names elsewhere).
+
+  Never one changed less than an hour ago (by its newest of modified and changed time: a build
+  not deployed yet), and never while a `node.exec` runs (a build may be under way; a
+  `node.exec` that comes during a cleaning waits for it, a few seconds). `hf/`, `fetched/`,
+  `mamba/` (the package cache, which environments hard-link from) and `tools/` stay. Only real
+  folders, never a link, removed without following any link inside; nothing at all when the
+  home, `images/` or `envs/` is not the node's account's or another account may write there
+  (group write only for that account's own primary group, never `amsyos-job`'s). Linux only. A
+  deploy whose command names an image folder that is no longer there is refused: deploy again
+  with a build (`amsyos deploy --force`).
 - **A server kept warm (2.1.2; contract 1 §3).** A service switched on with `enable … --serve
   "<command line>"`, or deployed with `serve` (§5), beside or instead of its command:
   - the node starts the server, in the service's folder, for a job, and keeps it for the next
@@ -221,7 +260,7 @@ to allow more than the node says.
 | Level | From afar, besides calling switched-on services | Jobs run as |
 |---|---|---|
 | `services` | nothing | `amsyos-job` |
-| `managed` | `deploy`, `switch` a service (managers) | `amsyos-job` |
+| `managed` | `deploy`, `undeploy` (2.1.5), `switch` a service (managers) | `amsyos-job` |
 | `full` | also `node.exec` and services deployed `as_node` (admins) | `node.exec` and `as_node` services: the node's own account; the rest `amsyos-job` |
 
 ### The default `as_node` (node 2.0.2)
@@ -264,11 +303,15 @@ with `as_node_default`.
  "service": "t_org.name.sub", "command": "<command line>", "serve": "<command line>",
  "as_node": false,
  "package": {"url": "https://…/node/in/<token>", "sha256": "<hex>", "size": 1234}}
+{"t": "action", "id": "x_…", "what": "undeploy", "by": "u_…", "service": "t_org.name.sub"}
 {"t": "action", "id": "x_…", "what": "switch", "by": "u_…", "service": "…", "on": true}
 {"t": "action", "id": "x_…", "what": "lower", "by": "u_…", "access": "services" | "managed"}
 ```
 
 - **deploy** (level `managed` or `full`; `as_node` only at `full`):
+  - 2.1.5: the service must be of the organisation the node joined (`t_<org>.…`), and an
+    image folder its command names (`_node/run.sh <folder>`) must still be there (§4
+    "Builds"); otherwise it refuses;
   - `command`, `serve` (2.1.2: a server kept warm, §4) or both; the kernel sends `serve` only to
     a node that says 2.1.2 or later, and leaves it out when not given;
   - the node fetches the package (a zip, at most 200 MB, from the Gateway's own origin) and
@@ -280,9 +323,21 @@ with `as_node_default`.
   - it puts the service in `services.json` as switched on (`managed: true`, `by`, the
     package's hash), replacing an earlier deploy of the same service, and then removes the
     earlier folder;
+  - then it cleans the builds no deployment uses (§4 "Builds");
   - the kernel, once the node says `done`: when a version of the service is defined
     (`compute: node`, with an example), that version now runs the new code, so its check
     runs again (`node.deploy` answers with it; `describe` shows how it ended).
+- **undeploy** (2.1.5; level `managed` or `full`, a service of the node's own organisation):
+  only what a deploy put here. It stops the service's idle warm servers (a busy one ends
+  after its job), removes its entry from `services.json` and its folder (only inside the
+  managed services root), then cleans the builds no deployment uses (§4 "Builds"). A service
+  the person switched on at the machine (`managed` false) is refused: only they disable it.
+  One not here: done, nothing removed. Its `done` adds `"removed": true | false` and
+  `"freed_gb"`, what the node freed (the folder and the builds). The kernel (`node.undeploy`,
+  and `service.remove` for each own node that has the service) sends it only at `managed` or
+  `full`; to a node that is offline it is kept (`node.list`: state `pending`) and sent after
+  the node's next hello, again at each connection until the node answers; a node before 2.1.5
+  is sent `switch` `on: false` instead.
 - **switch**: turns a service in `services.json` on or off (any service there).
 - **lower**: sets the level to the one named only if it is lower; otherwise it refuses.
 

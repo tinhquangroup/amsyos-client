@@ -16,17 +16,21 @@ use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::Url;
 use serde_json::{json, Map, Value};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Notify, RwLock};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
 
 use crate::config::{self, Access, Config, Service, Services};
 use crate::exec::{self, Limits};
-use crate::{folder, info, machine, mem, pymod, serve, sys, util, warn};
+use crate::{builds, folder, info, machine, mem, pymod, serve, sys, util, warn};
 
 const FRAME_MAX: usize = 64 << 10;
 const HINT_MAX: usize = 500;
+/// Node 2.1.5: the disk is measured at most this often (a walk of a big folder costs), and
+/// soon after a deploy or an undeploy, but never twice within MEASURE_GAP.
+const MEASURE_S: u64 = 600;
+const MEASURE_GAP: Duration = Duration::from_secs(60);
 
 pub fn tls() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
@@ -197,11 +201,28 @@ struct Ctx {
     said: Mutex<String>,
     /// Node 2.1.2: the servers kept warm.
     pool: serve::Shared,
+    /// Node 2.1.5: held (read) by each node.exec while it runs, taken (write) by a cleaning of
+    /// the builds, which waits for none and is done at the next chance instead (builds.rs).
+    builds: Arc<RwLock<()>>,
+    /// Node 2.1.5: the command lines of the jobs running now (they name their build's image).
+    using: Mutex<HashMap<String, Vec<String>>>,
+    /// Node 2.1.5: measure the disk soon (a deploy or an undeploy changed it).
+    disk_now: Notify,
 }
 
 impl Ctx {
     fn send(&self, v: Value) {
         let _ = self.out.send(v.to_string());
+    }
+
+    /// Node 2.1.5: every command line that may name a build's image: each service of
+    /// services.json (on or off, deployed or switched on here) and each job running now.
+    fn lines_in_use(&self) -> Vec<String> {
+        let mut lines: Vec<String> = Services::load(&self.node_dir).services.values().flat_map(Service::lines).collect();
+        if let Ok(u) = self.using.lock() {
+            lines.extend(u.values().flatten().cloned());
+        }
+        lines
     }
 
     fn running_ids(&self) -> Vec<String> {
@@ -359,6 +380,9 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         running: Mutex::new(HashMap::new()),
         said: Mutex::new(String::new()),
         pool: serve::Pool::new(slots.max(2) as usize, machine.ram_gb),
+        builds: Arc::new(RwLock::new(())),
+        using: Mutex::new(HashMap::new()),
+        disk_now: Notify::new(),
     });
     info!(
         "AMSYOS Node {} — node {} of {}, a {}, {} slot(s), jobs in {}, Gateway {}",
@@ -378,6 +402,7 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         let _ = stop_tx.send(true);
     });
     tokio::spawn(serve::reap(ctx.pool.clone(), ctx.node_dir.clone(), stop.clone()));
+    tokio::spawn(watch_disk(ctx.clone(), stop.clone()));
 
     let mut backoff = 1u64;
     let mut pending: Option<String> = None;
@@ -797,6 +822,11 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
     if let Ok(mut r) = ctx.running.lock() {
         r.insert(id.to_string(), tx);
     }
+    if exec.is_none() {
+        if let Ok(mut u) = ctx.using.lock() {
+            u.insert(id.to_string(), svc.lines());
+        }
+    }
     let mut taken = ctx.state(id, "running");
     if as_node && exec.is_none() {
         taken.insert("as_node".into(), true.into()); // the kernel logs it (node.list)
@@ -806,13 +836,19 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
     let ctx = ctx.clone();
     tokio::spawn(async move {
         let id = job.id.clone();
+        // Node 2.1.5: no cleaning of the builds while a node.exec runs (it may be a build).
+        let held = if job.exec.is_some() { Some(ctx.builds.clone().read_owned().await) } else { None };
         let started = Instant::now();
         info!("job {id} of {}: taken", job.service);
         let msg = do_job(&ctx, &job, &svc, rx, started).await;
+        drop(held);
         info!("job {id}: {}", msg.get("status").and_then(Value::as_str).unwrap_or("?"));
         ctx.send(msg);
         if let Ok(mut r) = ctx.running.lock() {
             r.remove(&id);
+        }
+        if let Ok(mut u) = ctx.using.lock() {
+            u.remove(&id);
         }
     });
 }
@@ -1050,6 +1086,11 @@ fn is_action_id(s: &str) -> bool {
 
 /// The answer to an action, logged with who asked.
 fn answer(ctx: &Ctx, id: &str, what: &str, by: &str, done: Result<String, String>) {
+    answer_with(ctx, id, what, by, done, Map::new());
+}
+
+/// The answer to an action with more to say (2.1.5: `undeploy`'s `removed` and `freed_gb`).
+fn answer_with(ctx: &Ctx, id: &str, what: &str, by: &str, done: Result<String, String>, more: Map<String, Value>) {
     let (ok, hint) = match done {
         Ok(h) => (true, h),
         Err(h) => (false, h),
@@ -1060,13 +1101,21 @@ fn answer(ctx: &Ctx, id: &str, what: &str, by: &str, done: Result<String, String
     } else {
         warn!("action {id} {what} by {by}: refused: {hint}");
     }
-    ctx.send(json!({"t": "done", "id": id, "ok": ok, "hint": util::cut(&hint, HINT_MAX), "access": access.as_str()}));
+    let mut msg = Map::new();
+    msg.insert("t".into(), "done".into());
+    msg.insert("id".into(), id.into());
+    msg.insert("ok".into(), ok.into());
+    msg.insert("hint".into(), util::cut(&hint, HINT_MAX).into());
+    msg.insert("access".into(), access.as_str().into());
+    msg.extend(more);
+    ctx.send(Value::Object(msg));
     ctx.send(Value::Object(ctx.activity("beat")));
 }
 
-/// TODO(review): isolation — actions from afar (sdk/NODE.md §5): `deploy` and `switch` only at
-/// `managed` or `full`, `as_node` only at `full`, `lower` only downwards. The level is read
-/// from the machine's own config.json at each action, never taken from the message.
+/// TODO(review): isolation — actions from afar (sdk/NODE.md §5): `deploy`, `undeploy` (2.1.5)
+/// and `switch` only at `managed` or `full`, `as_node` only at `full`, `lower` only downwards.
+/// The level is read from the machine's own config.json at each action, never taken from the
+/// message.
 fn take_action(ctx: &Arc<Ctx>, v: &Value) {
     let Some(id) = v.get("id").and_then(Value::as_str).filter(|s| is_action_id(s)).map(String::from) else {
         warn!("an action without a valid id: left alone");
@@ -1112,18 +1161,25 @@ fn take_action(ctx: &Arc<Ctx>, v: &Value) {
             };
             answer(ctx, &id, &what, &by, done);
         }
-        "switch" | "deploy" => {
+        "switch" | "deploy" | "undeploy" => {
             if let Err(e) = need_managed(&what) {
                 answer(ctx, &id, &what, &by, Err(e));
                 return;
             }
             let (ctx, v) = (ctx.clone(), v.clone());
             tokio::spawn(async move {
-                let done = if what == "switch" { switch(&ctx, &v).await } else { deploy(&ctx, &v, level, &by).await };
-                answer(&ctx, &id, &what, &by, done);
+                let (done, more) = match what.as_str() {
+                    "switch" => (switch(&ctx, &v).await, Map::new()),
+                    "deploy" => (deploy(&ctx, &v, level, &by).await, Map::new()),
+                    _ => match undeploy(&ctx, &v, &by).await {
+                        Ok((hint, more)) => (Ok(hint), more),
+                        Err(e) => (Err(e), Map::new()),
+                    },
+                };
+                answer_with(&ctx, &id, &what, &by, done, more);
             });
         }
-        _ => answer(ctx, &id, &what, &by, Err("what: deploy, switch or lower".into())),
+        _ => answer(ctx, &id, &what, &by, Err("what: deploy, undeploy, switch or lower".into())),
     }
 }
 
@@ -1133,6 +1189,17 @@ fn service_of(v: &Value) -> Result<String, String> {
         .filter(|s| util::is_service_id(s))
         .map(String::from)
         .ok_or_else(|| "service: an id like t_org.name.sub".to_string())
+}
+
+/// A service of the organisation this node serves (`deploy`, `undeploy`): the node checks it
+/// itself. TODO(review): isolation.
+fn own_service_of(ctx: &Ctx, v: &Value) -> Result<String, String> {
+    let service = service_of(v)?;
+    let org = Config::load(&ctx.node_dir).org;
+    if org.is_empty() || !service.starts_with(&format!("{org}.")) {
+        return Err(format!("service: {service} is not of {org}, the organisation this node serves"));
+    }
+    Ok(service)
 }
 
 /// `switch`: a service of services.json on or off. On again only if the job account still
@@ -1160,7 +1227,7 @@ async fn switch(ctx: &Arc<Ctx>, v: &Value) -> Result<String, String> {
 /// account; only then switched on. The earlier folder is removed only if it was a deploy's
 /// inside the managed root, never a folder the person switched on.
 async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<String, String> {
-    let service = service_of(v)?;
+    let service = own_service_of(ctx, v)?;
     let as_node = v.get("as_node").and_then(Value::as_bool).unwrap_or(false);
     if as_node && level < Access::Full {
         return Err(format!("as_node needs the access level full at this machine (it is {})", level.as_str()));
@@ -1173,6 +1240,15 @@ async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<St
         return Err("command or serve (or both): each one line, at most 2000 characters".into());
     }
     let serve = (!serve.is_empty()).then_some(serve);
+    // Node 2.1.5: the image a build of `amsyos deploy` made must still be here (a cleaning
+    // removes one no deployment names, builds.rs).
+    let lines: Vec<String> = std::iter::once(command.clone()).chain(serve.clone()).collect();
+    if let Some(image) = builds::image_of(&lines).filter(|i| !builds::is_image(i)) {
+        return Err(format!(
+            "the build {} is not on this machine (removed once no deployment used it, or never made): deploy again with a build (amsyos deploy --force)",
+            image.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| image.display().to_string())
+        ));
+    }
     let package = v.get("package").cloned().unwrap_or(Value::Null);
     let url = package
         .get("url")
@@ -1235,6 +1311,7 @@ async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<St
         sha256: Some(sha.clone()),
         as_node,
         as_job: false,
+        since: Some(util::now_utc()),
     };
     let earlier = Services::update(&ctx.node_dir, |s| Ok(s.services.insert(service.clone(), entry)))?;
     if let Some(old) = earlier.filter(|o| o.managed && o.dir != folder && sys::within(&o.dir, &root) && o.dir != root) {
@@ -1244,8 +1321,136 @@ async fn deploy(ctx: &Arc<Ctx>, v: &Value, level: Access, by: &str) -> Result<St
     }
     info!("deploy of {service} by {by}: {files} files, {bytes} bytes (package {size} bytes, sha256 {sha}) in {}{}{}",
           folder.display(), if as_node { ", as_node" } else { "" }, if served { ", served warm" } else { "" });
-    Ok(format!("{service} is on, from {files} files in {}{}", folder.display(),
-               if served { "; its jobs go through a server kept warm (serve)" } else { "" }))
+    let freed = clean_builds(ctx, "a deploy").await;
+    ctx.disk_now.notify_one();
+    Ok(format!("{service} is on, from {files} files in {}{}{}", folder.display(),
+               if served { "; its jobs go through a server kept warm (serve)" } else { "" },
+               if freed > 0 { format!("; {} GB of builds no deployment uses freed", builds::gb(freed)) } else { String::new() }))
+}
+
+/// Node 2.1.5: `undeploy` (sdk/NODE.md §5): a service a deploy put here: its idle warm servers
+/// stopped, its entry and its folder removed, then the builds no deployment uses. A service the
+/// person switched on here is theirs (refused); one that is not here: nothing to remove.
+/// TODO(review): isolation — only what a deploy put here: an entry `managed`, its folder only
+/// inside the managed root.
+async fn undeploy(ctx: &Arc<Ctx>, v: &Value, by: &str) -> Result<(String, Map<String, Value>), String> {
+    let service = own_service_of(ctx, v)?;
+    let found = Services::load(&ctx.node_dir).services.get(&service).cloned();
+    if found.as_ref().is_some_and(|s| !s.managed) {
+        return Err(format!(
+            "{service} was switched on at this machine by its person, not deployed: only they remove it, there (amsyos-node disable {service})"
+        ));
+    }
+    let mut freed = 0u64;
+    let mut said = Vec::new();
+    let removed = found.is_some();
+    if let Some(svc) = found {
+        let stopped = serve::stop_service(&ctx.pool, &service).await;
+        if stopped > 0 {
+            said.push(format!("{stopped} warm server(s) stopped"));
+        }
+        Services::update(&ctx.node_dir, |s| Ok(s.services.remove(&service)))?;
+        let root = Config::load(&ctx.node_dir).services_root();
+        if sys::within(&svc.dir, &root) && svc.dir != root {
+            let dir = svc.dir.clone();
+            let gone = tokio::task::spawn_blocking(move || {
+                let n = builds::freed_by(&dir);
+                std::fs::remove_dir_all(&dir).map(|_| n).map_err(|e| format!("{}: {e}", dir.display()))
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            match gone {
+                Ok(n) => freed += n,
+                Err(e) => said.push(format!("its folder could not be removed ({e})")),
+            }
+        }
+    } else {
+        said.push("it was not deployed here".to_string());
+    }
+    freed += clean_builds(ctx, "an undeploy").await;
+    ctx.disk_now.notify_one();
+    let notes: String = said.iter().map(|s| format!("{s}; ")).collect();
+    info!("undeploy of {service} by {by}: {notes}{} GB freed", builds::gb(freed));
+    let mut more = Map::new();
+    more.insert("removed".into(), removed.into());
+    more.insert("freed_gb".into(), builds::gb(freed).into());
+    let head = if removed { format!("{service} removed") } else { format!("{service}: nothing to remove") };
+    Ok((format!("{head}; {notes}{} GB freed", builds::gb(freed)), more))
+}
+
+/// Node 2.1.5: the builds no deployment (nor a job running now) uses, removed (builds.rs);
+/// skipped while a node.exec runs, done at the next deploy, undeploy or start. The bytes freed.
+async fn clean_builds(ctx: &Arc<Ctx>, after: &str) -> u64 {
+    let Some(home) = builds::home() else { return 0 };
+    let Ok(held) = ctx.builds.clone().try_write_owned() else {
+        info!("builds: not cleaned after {after}: a node.exec (or another cleaning) runs; done at the next deploy, undeploy or start");
+        return 0;
+    };
+    let lines = ctx.lines_in_use();
+    let done = tokio::task::spawn_blocking(move || {
+        let _held = held;
+        builds::clean(&home, &lines, builds::MIN_AGE)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    match done {
+        Ok(c) => {
+            if !c.is_empty() {
+                info!(
+                    "builds no deployment uses, removed after {after}: images [{}], environments [{}], {} GB freed{}",
+                    c.images.join(", "),
+                    c.envs.join(", "),
+                    builds::gb(c.freed),
+                    if c.failed.is_empty() { String::new() } else { format!("; not removed: {}", c.failed.join("; ")) }
+                );
+            }
+            c.freed
+        }
+        Err(e) => {
+            warn!("builds: not cleaned after {after}: {e}");
+            0
+        }
+    }
+}
+
+/// Node 2.1.5: the builds cleaned at the node's start, then what each deployment holds of the
+/// disk and the builds no deployment uses (`disk`, sdk/NODE.md §4), measured every MEASURE_S
+/// and soon after a deploy or an undeploy (never twice within MEASURE_GAP), said to the
+/// Gateway when it changed.
+async fn watch_disk(ctx: Arc<Ctx>, mut stop: watch::Receiver<bool>) {
+    clean_builds(&ctx, "the node's start").await;
+    let mut last = String::new();
+    loop {
+        let measured_at = Instant::now();
+        let nd = ctx.node_dir.clone();
+        let using: Vec<String> = ctx.using.lock().map(|u| u.values().flatten().cloned().collect()).unwrap_or_default();
+        let measured = tokio::task::spawn_blocking(move || {
+            let deployments: Vec<builds::Deployment> = Services::load(&nd)
+                .services
+                .into_iter()
+                .filter(|(_, s)| s.managed)
+                .map(|(id, s)| builds::Deployment { lines: s.lines(), dir: s.dir, since: s.since, id })
+                .collect();
+            builds::measure(builds::home().as_deref(), &deployments, &using)
+        })
+        .await;
+        if let Ok(Value::Object(mut m)) = measured {
+            let text = Value::Object(m.clone()).to_string();
+            if text != last {
+                last = text;
+                m.insert("t".into(), "disk".into());
+                ctx.send(Value::Object(m));
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(MEASURE_S)) => {}
+            _ = ctx.disk_now.notified() => {
+                tokio::time::sleep(MEASURE_GAP.saturating_sub(measured_at.elapsed()).max(Duration::from_secs(2))).await;
+            }
+            _ = stop.changed() => return,
+        }
+    }
 }
 
 /// GET a package into the node's own folder, at most `most` bytes, and its SHA-256.
