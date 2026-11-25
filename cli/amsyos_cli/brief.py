@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from amsyos_cli import detach, repo
+from amsyos_cli import adapters, detach, repo
 from amsyos_cli.common import gateway_default, obj, seq
 
 BEGIN, END = "<!-- amsyos:brief -->", "<!-- /amsyos:brief -->"
@@ -183,6 +183,8 @@ def quiet(start: Path) -> int:
         if root is None:
             return 0
         gateway = gateway_default()
+        with contextlib.suppress(Exception):  # a hook a later CLI added (adapters.py)
+            adapters.refresh_plugin(root, gateway)
         entry = read_cache(root, gateway)
         if entry and seq(entry.get("lines")):
             write_all(root, entry)

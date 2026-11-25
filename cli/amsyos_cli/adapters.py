@@ -110,13 +110,47 @@ def _section(
     return found
 
 
-def claude(root: Path, r: Render, done: Written) -> None:
+def _plugin(root: Path, r: Render, done: Written) -> None:
+    """The plugin's own files from the templates (hooks, skill, manifest); the skill's
+    `brief.md`, which `amsyos sync` writes, is not one of them and is left."""
     plugin = PLUGINS / "amsyos"
     base = r.src / "claude"
     for path in sorted(base.rglob("*")):
         if path.is_file():
             rel = path.relative_to(base)
             _put(root, plugin / rel, r.text(f"claude/{rel}"), done)
+
+
+def _numbers(version: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return ()
+
+
+def refresh_plugin(root: Path, gateway: str) -> list[str]:
+    """Claude Code's plugin that `init` wrote, brought up to this CLI: its files written
+    again from the templates when the version stamped in its manifest is older, so that a
+    hook added in a later CLI (the Stop hook of `amsyos bg`, 0.5.18) reaches a project
+    without `amsyos init` again. Claude Code loads a plugin of a local marketplace in place
+    and reads it at the next session start (or `/reload-plugins`): nothing for the person
+    to run. It only replaces what `init` wrote, as `init` again would; the plugin stays
+    the person's to enable or not. The files written, or none."""
+    stamp = root / PLUGINS / "amsyos" / ".claude-plugin" / "plugin.json"
+    try:
+        had: Any = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    version = had.get("version") if isinstance(had, dict) else None  # pyright: ignore[reportUnknownMemberType]
+    if not isinstance(version, str) or not (_numbers(version) < _numbers(__version__)):
+        return []  # as new or newer (a CLI rolled back leaves a newer plugin as it is)
+    done = Written()
+    _plugin(root, Render(gateway), done)
+    return done.files
+
+
+def claude(root: Path, r: Render, done: Written) -> None:
+    _plugin(root, r, done)
     marketplace = {
         "name": MARKETPLACE,
         "owner": {"name": "AMSYOS"},

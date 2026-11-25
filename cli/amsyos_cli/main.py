@@ -1539,6 +1539,8 @@ async def cmd_sync(args: argparse.Namespace, out: Out) -> int:
     inited = brief.root_of(start)
     root = inited or start
     creds = credentials()
+    if inited is not None:  # the Claude Code plugin init wrote, up to this CLI (adapters.py)
+        hosts.refresh_plugin(inited, creds.gateway)
     project = _project_here(root, creds.gateway, args.project)
     async with Api(creds, out) as api:
         if project is None and inited is None:
