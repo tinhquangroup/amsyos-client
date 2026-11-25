@@ -2000,6 +2000,10 @@ def parser() -> Parser:
         "--with-image", action="store_true",
         help="a service of the rented node: forget its kept image too",
     )  # fmt: skip
+    p.add_argument(
+        "--ignore-code-calls", action="store_true",
+        help="remove it although another service's code called it lately (it may be dead code)",
+    )  # fmt: skip
     p.add_argument("--yes", action="store_true", help="remove it now (without: a dry run)")
 
     p = add(

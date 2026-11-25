@@ -5,10 +5,12 @@ works, take out what does not as a whole.
   version a bare id runs and its check, and over the last 30 days its runs, failure share,
   median time, credit spent, its last run and the disk it holds on own nodes
   (`service.pool`);
-- `amsyos uninstall <service | family.*> [--version V] [--yes]`: without `--yes` a dry run
-  (`service.remove` with `dry_run`) saying everything that would go and the disk it frees;
-  with `--yes` the removal, undoable for 7 days (a version's is final). A refusal lists every
-  user of it outside the removal, each with its fix;
+- `amsyos uninstall <service | family.*> [--version V] [--ignore-code-calls] [--yes]`:
+  without `--yes` a dry run (`service.remove` with `dry_run`) saying everything that would go
+  and the disk it frees; with `--yes` the removal, undoable for 7 days (a version's is
+  final). A refusal lists every user of it outside the removal, each with its fix; a call
+  from another service's code in the last 30 days (kind `code`) may be dead code, and
+  `--ignore-code-calls` removes it anyway once read;
 - `amsyos restore <service | family.*>`: a removal of the last 7 days undone
   (`service.restore`); a service of an own node is then deployed again (`amsyos deploy`).
 
@@ -39,6 +41,7 @@ FIX = {
     "offer": "amsyos run offer.withdraw offer={id}",
     "binding": "another organisation's, through your offer: withdraw the offer, then wait",
     "job": "amsyos wait {id}, or amsyos cancel {id}",
+    "code": "its code calls it: change that code, or uninstall both (a family)",
 }
 
 
@@ -178,15 +181,27 @@ def refused_lines(exc: CliError) -> list[str]:
     for user in users[:MOST_USERS]:
         kind, ident = str(user.get("kind") or "?"), str(user.get("id") or "?")
         fix = FIX.get(kind, "").format(id=ident)
+        calls = (
+            f" ({user.get('calls')} calls in 30 days, the last {str(user.get('last'))[:10]})"
+            if kind == "code"
+            else ""
+        )
         lines.append(
-            f"  {kind} {ident} uses {user.get('uses') or '?'}" + (f": {fix}" if fix else "")
+            f"  {kind} {ident} uses {user.get('uses') or '?'}{calls}" + (f": {fix}" if fix else "")
         )
     if len(users) > MOST_USERS:
         lines.append(f"  … {len(users) - MOST_USERS} more (--json lists every one)")
+    if any(str(u.get("kind")) == "code" for u in users):
+        lines.append(
+            "  a call from code may be dead code: once you have read them, "
+            "--ignore-code-calls removes it anyway"
+        )
     return lines
 
 
-def removal_lines(data: dict[str, Any], service: str, *, done: bool) -> list[str]:
+def removal_lines(
+    data: dict[str, Any], service: str, *, done: bool, ignore: bool = False
+) -> list[str]:
     """What `service.remove` answered (or, in a dry run, would do), and the next step."""
     removed = [str(s) for s in seq(data.get("removed"))]
     if not removed:  # a Gateway before the pool: the removed id among the outputs
@@ -216,6 +231,8 @@ def removal_lines(data: dict[str, Any], service: str, *, done: bool) -> list[str
             else f"undo for 7 days: amsyos restore {service}"
         )
         again = f" --version {version}" if version else ""
+        if ignore:
+            again += " --ignore-code-calls"
         lines.append(f"next: amsyos uninstall {service}{again} --yes ({undo})")
     elif until:
         lines.append(f"undo until {until} with amsyos restore {service}")
@@ -233,6 +250,8 @@ async def cmd_uninstall(args: argparse.Namespace, out: Out) -> int:
             asked["version"] = args.version
         if args.with_image:
             asked["with_image"] = True
+        if getattr(args, "ignore_code_calls", False):
+            asked["ignore_code_calls"] = True
         if not args.yes:
             asked["dry_run"] = True
         try:
@@ -248,7 +267,8 @@ async def cmd_uninstall(args: argparse.Namespace, out: Out) -> int:
                 raise
             sys.stderr.write("".join(f"{line}\n" for line in refused_lines(exc)))
             return 1
-    out.emit(data, *removal_lines(data, service, done=bool(args.yes)))
+    ignore = bool(getattr(args, "ignore_code_calls", False))
+    out.emit(data, *removal_lines(data, service, done=bool(args.yes), ignore=ignore))
     return 0
 
 
