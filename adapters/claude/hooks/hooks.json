@@ -1,5 +1,5 @@
 {
-  "description": "AMSYOS: at start, a newer amsyos installed when one is out (at most one check a day, silent otherwise), the project's brief from the last sync written into the skill's brief.md and refreshed in the background; on a prompt, at most once a minute, what others in the workspace did that this project was not told yet (at most 5 lines, nothing on any error); before compaction, a checkpoint of open work. Deterministic, no model, quiet, within 3 s.",
+  "description": "AMSYOS: at start, a newer amsyos installed when one is out (at most one check a day, silent otherwise), the project's brief from the last sync written into the skill's brief.md and refreshed in the background; on a prompt, at most once a minute, what others in the workspace did that this project was not told yet (at most 5 lines, nothing on any error); before compaction, a checkpoint of open work; before the turn ends, a hold while a background task of this run (amsyos bg start) ended unread or is quiet, overdue or lost (until it is looked at, at most twice a state, never for a task that runs well). Deterministic, no model, quiet, within 3 s.",
   "hooks": {
     "SessionStart": [
       {"hooks": [{"type": "command", "command": "amsyos self-update --if-needed >/dev/null 2>&1 || true", "timeout": 120}]},
@@ -10,6 +10,9 @@
     ],
     "PreCompact": [
       {"hooks": [{"type": "command", "command": "amsyos work checkpoint --quiet >/dev/null 2>&1 || true", "timeout": 5}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "amsyos bg hook-stop 2>/dev/null || true", "timeout": 5}]}
     ]
   }
 }

@@ -7,7 +7,10 @@ the MCP client is loaded:
 - `amsyos work checkpoint --quiet` (PreCompact): a no-op until the session's checkpoint
   needs it;
 - `amsyos around --hook` (UserPromptSubmit): at most once a minute, what others in the
-  workspace did (amsyos_cli/around.py). Every other command, `work` included, runs in full.
+  workspace did (amsyos_cli/around.py);
+- `amsyos bg hook-stop` (Stop): holds the turn while a background task of this run ended
+  unread or is quiet, overdue or lost (amsyos_cli/bg.py). Every other command, `work`
+  included, runs in full.
 """
 
 import contextlib
@@ -87,6 +90,10 @@ def main() -> int:
         from amsyos_cli import around  # noqa: PLC0415 - light until it calls
 
         return around.hook(Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()))
+    if words[:2] == ("bg", "hook-stop") and not {"-h", "--help"} & set(args):
+        from amsyos_cli import bg  # noqa: PLC0415 - light until it calls
+
+        return bg.hook_stop()
     from amsyos_cli.main import main as full  # noqa: PLC0415 - loaded only when needed
 
     return full()

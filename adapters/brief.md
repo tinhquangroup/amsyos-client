@@ -15,9 +15,9 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   own and those offered to it. `amsyos describe <service>`: its inputs, examples, a `run` line.
 - Run one: `amsyos run <service> k=v ... --wait` (a local file as `k=@path`, sent only when the
   workspace lacks it). Outputs land in `./out/<job>/` (names and sizes printed, no contents or links).
-- A long job: `amsyos wait <job>` (through a person's approval too; `--timeout s`), `status`,
-  `result`, `logs [-f]`, `cancel`; never poll in a loop of your own. A recipe or mission:
-  `amsyos work show <job>` lists its steps, `work resume <job>` reruns only what failed.
+- A long job: `amsyos wait <job>` (a person's approval too; `--timeout s`), `status`, `result`, `logs
+  [-f]`, `cancel`; never poll in a loop. A recipe or mission: `work show <job>` lists its steps, `work
+  resume <job>` reruns what failed. Run a local command over a minute with `amsyos bg start -- <cmd>`.
 - Files: `amsyos files put <paths>|get <asset://...>|ls`; mark `face`: may show a real person.
 - This repository as a service: `amsyos init` binds it and proposes `amsyos.yaml` (fill each
   `<fill: ...>`; `card --help`: every key); a desk: `--type studio` (builds many services) or `work`

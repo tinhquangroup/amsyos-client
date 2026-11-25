@@ -20,7 +20,7 @@ repository.
 
 The same command on Windows, macOS and Linux (it needs [uv](https://docs.astral.sh/uv/)):
 
-    uvx --from https://103.77.173.205/cli/amsyos_cli-0.5.17-py3-none-any.whl amsyos install
+    uvx --from https://103.77.173.205/cli/amsyos_cli-0.5.18-py3-none-any.whl amsyos install
 
 Then `amsyos login`, and later `amsyos self-update`. `/cli/latest.json` on the Gateway names
 the newest wheel with its sha256.

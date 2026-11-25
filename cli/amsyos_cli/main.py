@@ -24,6 +24,7 @@ from amsyos_cli import patch as patches
 from amsyos_cli import setup as setups
 from amsyos_cli import update as updates
 from amsyos_cli.api import TERMINAL, Api, done, held_up, idempotency_key, refused_field
+from amsyos_cli.bg import add_parsers as add_bg
 from amsyos_cli.common import (
     CliError,
     Credentials,
@@ -2016,6 +2017,7 @@ def parser() -> Parser:
     p.add_argument("service", help="t_x.name, name (yours), or a family: name.*")
 
     add_git(add, common)  # spec v3 §18: amsyos repo …, amsyos git-credential
+    top.commands.update(add_bg(add, common))  # watched background tasks (2026-11-25)
 
     p = add(
         "self-update", cmd_self_update,
