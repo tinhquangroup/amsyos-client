@@ -77,9 +77,11 @@ from amsyos_cli.jobs import (
     with_basis,
     with_id,
 )
+from amsyos_cli.later import add_parsers as add_later
 from amsyos_cli.login import host_of, login
 from amsyos_cli.overview import overview, session_show
 from amsyos_cli.pool import cmd_pool, cmd_restore, cmd_uninstall
+from amsyos_cli.secret import add_parsers as add_secret
 from amsyos_cli.shell import cli_hint, quoted
 from amsyos_cli.space import cmd_node
 from amsyos_cli.watch import cmd_watch
@@ -2020,6 +2022,8 @@ def parser() -> Parser:
 
     add_git(add, common)  # spec v3 §18: amsyos repo …, amsyos git-credential
     top.commands.update(add_bg(add, common))  # watched background tasks (2026-11-25)
+    top.commands.update(add_later(add, common))  # checks set for later (2026-11-25)
+    top.commands.update(add_secret(add, common))  # secrets kept out of the context (2026-11-25)
 
     p = add(
         "self-update", cmd_self_update,

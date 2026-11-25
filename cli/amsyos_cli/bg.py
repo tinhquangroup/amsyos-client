@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any
 from amsyos_cli import detach
 from amsyos_cli.common import CliError, Out, credentials, obj, seq, short
 from amsyos_cli.instance import instance_of
+from amsyos_cli.secret import env_specs, fetch, masked_pipe
 
 if TYPE_CHECKING:
     from amsyos_cli.api import Api
@@ -107,8 +108,9 @@ _TIME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|d)?\s*$", re.IGNORECAS
 _UNITS = {"": 1, "s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "d": 86400}
 USAGE = (
     "amsyos bg start [--name N] [--expect 10m] [--quiet-after 5m] [--kill-after-quiet 30m] "
-    "[--out PATH] -- <command...>"
+    "[--out PATH] [--env NAME[=VAR]] -- <command...>"
 )
+PUMP_JOIN_S = 5.0  # the masked output's last bytes, once the command ended
 
 
 TASKKILL = "taskkill.exe"
@@ -543,6 +545,7 @@ class _Supervisor:
         self.beaten: str | None = None  # the state AMSYOS was last told
         self.beat_ok = float("-inf")
         self.registered_at = float("-inf")
+        self.pumping: threading.Thread | None = None  # `--env`: the output through a masker
 
     # -------------------------------------------------- state and beats
     def save(self, **changes: Any) -> None:
@@ -623,6 +626,7 @@ class _Supervisor:
             except OSError as exc:
                 log.write(f"amsyos bg: could not start {_base(argv[0]) if argv else '?'}: "
                           f"{exc.strerror or exc}\n".encode())  # fmt: skip
+                log.flush()  # read at once by bg start (secrets not fetched: why)
                 now = time.time()
                 self.save(state="failed", exit=127, elapsed_s=0, quiet_s=0, ended=now, since=now)
                 self.final()
@@ -680,6 +684,8 @@ class _Supervisor:
                     )
                 self.beat()
                 self.save()
+            if self.pumping is not None:
+                self.pumping.join(PUMP_JOIN_S)
             elapsed = time.monotonic() - began
             exit_code = code if code >= 0 else 128 - code
             if self.stop_why is not None:
@@ -700,11 +706,27 @@ class _Supervisor:
         if not argv:
             raise OSError("no command")
         env = {**os.environ, "AMSYOS_BG_TASK": self.remote or self.folder.name}
+        # `--env`: the workspace's secrets, fetched now with the run's login (the spec file
+        # keeps their names only), given to the command and masked in its log (secret.py).
+        # TODO(review): credentials — values held by this process, never written unmasked.
+        pairs = [(str(p[0]), str(p[1])) for p in seq(self.spec.get("env")) if len(seq(p)) == 2]
+        values: dict[str, str] = {}
+        if pairs:
+            try:
+                values = asyncio.run(fetch(list(dict.fromkeys(n for n, _ in pairs))))
+            except Exception as exc:
+                said = f": {short(exc.hint, 200)}" if isinstance(exc, CliError) else ""
+                raise OSError(f"its secrets were not fetched ({_code(exc)}{said})") from None
+            env.update({var: values[name] for name, var in pairs})
         flags = detach.CREATE_NEW_PROCESS_GROUP | detach.CREATE_NO_WINDOW if windows() else 0
-        return subprocess.Popen(  # noqa: S603 - the agent's own command, on its own machine
-            argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(  # noqa: S603 - the agent's own command, on its own machine
+            argv, cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if values else log, stderr=subprocess.STDOUT,
             env=env, close_fds=True, start_new_session=not windows(), creationflags=flags,
         )  # fmt: skip
+        if values:
+            self.pumping = masked_pipe(proc.stdout, log.write, values, log.flush)
+        return proc
 
     def kill(self, proc: subprocess.Popen[bytes], measure: _Measure, log: Any) -> None:
         extra = measure.tree()[1] if measure.linux else set[int]()
@@ -768,6 +790,7 @@ async def cmd_start(args: argparse.Namespace, out: Out) -> int:
         if args.kill_after_quiet
         else None
     )
+    secrets_env = env_specs(list(args.env or []))  # names only; the supervisor fetches values
     cwd = Path.cwd()
     out_path = str((cwd / args.out).resolve()) if args.out else None
     instance = instance_of()
@@ -798,7 +821,8 @@ async def cmd_start(args: argparse.Namespace, out: Out) -> int:
     _write(
         folder / SPEC,
         {"argv": argv, "cwd": str(cwd), "out": out_path, "instance": instance,
-         "quiet_after_s": quiet_after, "kill_after_quiet_s": kill_after, "register": register},
+         "quiet_after_s": quiet_after, "kill_after_quiet_s": kill_after, "register": register,
+         "env": [[name, var] for name, var in secrets_env]},
     )  # fmt: skip
     now = time.time()
     state: dict[str, Any] = {
@@ -1275,6 +1299,12 @@ def add_parsers(add: Any, common: argparse.ArgumentParser) -> dict[str, argparse
     ps.add_argument(
         "--out", metavar="PATH", help="a file or folder it writes: its size is progress"
     )
+    ps.add_argument(
+        "--env", action="append", metavar="NAME[=VAR]",
+        help="a secret of the workspace in its environment (as NAME, or VAR), fetched by the "
+        "supervisor at start and masked in the log, as amsyos secret run does: against "
+        "accidents, not an agent that means to print it; repeat for more",
+    )  # fmt: skip
     ps.add_argument(  # not `command`: the top parser names the subcommand so (main.py)
         "argv",
         metavar="command",

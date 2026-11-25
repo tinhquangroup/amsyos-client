@@ -9,8 +9,10 @@ the MCP client is loaded:
 - `amsyos around --hook` (UserPromptSubmit): at most once a minute, what others in the
   workspace did (amsyos_cli/around.py);
 - `amsyos bg hook-stop` (Stop): holds the turn while a background task of this run ended
-  unread or is quiet, overdue or lost (amsyos_cli/bg.py). Every other command, `work`
-  included, runs in full.
+  unread or is quiet, overdue or lost (amsyos_cli/bg.py);
+- `amsyos later hook-stop` (Stop): holds the turn while a check set for later in this
+  project is due, from this machine's copies only (amsyos_cli/later.py). Every other
+  command, `work` included, runs in full.
 """
 
 import contextlib
@@ -94,6 +96,10 @@ def main() -> int:
         from amsyos_cli import bg  # noqa: PLC0415 - light until it calls
 
         return bg.hook_stop()
+    if words[:2] == ("later", "hook-stop") and not {"-h", "--help"} & set(args):
+        from amsyos_cli import later  # noqa: PLC0415 - the standard library only, no network
+
+        return later.hook_stop()
     from amsyos_cli.main import main as full  # noqa: PLC0415 - loaded only when needed
 
     return full()
