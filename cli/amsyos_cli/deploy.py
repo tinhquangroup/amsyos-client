@@ -2970,6 +2970,8 @@ async def _node_exec(  # noqa: PLR0917 - the deploy's state, passed on
     if kept:
         bits.append(f"{' and '.join(kept)} kept in your build cache for your next machine")
     out.note(f"built in {took}s: {'; '.join(bits)} (log: amsyos logs {job_id})")
+    for said in seq(built.get("warnings")):
+        out.note(f"warning: {short(str(said), 600)}")
     return built, []
 
 

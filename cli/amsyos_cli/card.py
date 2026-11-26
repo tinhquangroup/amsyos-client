@@ -174,6 +174,8 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
   setup       A command run once when the image is made: "npm ci", "go build -o app .".
               A big download: "amsyos-fetch <url> --sha256 <hex> --to <path> [--unpack]
               [--strip 1]": once a machine, one copy on the disk for all your images.
+              It runs in a folder of its own that is then moved to the image's: write
+              paths relative to the code's folder, never where setup ran.
   command     The command started once a job, in the code's folder: python main.py.
   serve       Instead of command or beside it: a server kept warm between jobs
               (python server.py); see `amsyos describe node.build`, input serve.

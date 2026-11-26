@@ -600,6 +600,45 @@ def setup(asked: dict[str, object], src: Path, env: Path, base: Path) -> None:
 
 
 # ---------------------------------------------------------------- the image
+STALE_MOST_FILES = 20_000
+STALE_MOST_BYTES = 200_000_000
+STALE_FILE_BYTES = 2_000_000
+
+
+def stale_paths(src: Path) -> list[str]:
+    """The files and links setup left in the code's folder that name it by its absolute
+    path (a customer, 2026-11-26: a path written into logs/cli_path.txt pointed into this
+    build's folder, which `put_image` moves away, and every job after failed on it). Text
+    files up to STALE_FILE_BYTES, within STALE_MOST_FILES and STALE_MOST_BYTES; at most 5."""
+    root = str(src.resolve())
+    needle = root.encode()
+    found: list[str] = []
+    files = read = 0
+    for path in src.rglob("*"):
+        if len(found) >= 5 or files >= STALE_MOST_FILES or read >= STALE_MOST_BYTES:
+            break
+        rel = path.relative_to(src)
+        if rel.parts[:1] == ("_node",):
+            continue
+        try:
+            if path.is_symlink():
+                if os.readlink(str(path)).startswith(root):
+                    found.append(f"{rel} (a link)")
+                continue
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size > STALE_FILE_BYTES:
+                continue
+            files += 1
+            read += size
+            if needle in path.read_bytes():
+                found.append(str(rel))
+        except OSError:
+            continue
+    return found
+
+
 def unpacked_modes(package: Path, src: Path) -> None:
     """`python -m zipfile -e` keeps no file mode: the executable ones made so again."""
     with zipfile.ZipFile(package) as zipped:
@@ -704,7 +743,16 @@ def build(package: Path, src: Path) -> dict[str, object]:
         image_began = time.monotonic()
         setup(asked, src, env, base)
         progress(90)
+        stale = stale_paths(src) if asked.get("setup") else []
         image = put_image(asked, src, env, base)
+        if stale:
+            said = (
+                f"setup wrote the build's own folder ({src}) into {', '.join(stale)}: that "
+                f"folder is moved to {image} when the build ends, so a job finds nothing "
+                "there; write paths relative to the code's folder (a job runs in it)"
+            )
+            log(f"warning: {said}")
+            told["warnings"] = [said]
         image_took = time.monotonic() - image_began
     if CACHE:
         if not image_cache.get("restored"):
