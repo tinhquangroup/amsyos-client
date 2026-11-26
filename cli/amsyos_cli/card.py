@@ -142,9 +142,9 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
   system      Programs from conda-forge, name or name=version: [ffmpeg, imagemagick=7.1.2].
               init proposes those the code runs (subprocess, os.system, shutil.which:
               ffmpeg and ffprobe → ffmpeg). Blender is not on conda-forge: setup fetches it.
-              On an own node their libraries are in $CONDA_PREFIX/lib, kept off the loader's
-              path so the system's programs keep theirs: start a pip wheel's program that
-              needs one (Chromium: nss, gbm) with LD_LIBRARY_PATH=$CONDA_PREFIX/lib.
+              On an own node their libraries are in $CONDA_PREFIX/lib, first on
+              LD_LIBRARY_PATH for setup and jobs: start a system program that must keep its
+              own libraries with LD_LIBRARY_PATH unset.
   packages    pip packages (Python): [numpy==2.1.3]. Empty: requirements.txt is used;
               without one, init proposes the packages the code imports.
   setup       A command run once when the image is made: "npm ci", "go build -o app .".

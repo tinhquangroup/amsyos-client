@@ -476,6 +476,31 @@ class Shown:
     lines: list[str]
 
 
+def picked_outputs(job_id: str, result: dict[str, Any], asked: list[str]) -> set[str] | None:
+    """The outputs `amsyos result <job> <output>…` names, to fetch only those (a customer,
+    2026-11-26: a 28 MB zip came along to read a 9 KB report): None when none is named.
+    `report.json` means the output `report`; a name the job has not is refused with its
+    outputs."""
+    if not asked:
+        return None
+    outputs = obj(result.get("outputs"))
+    picked: set[str] = set()
+    bad: list[str] = []
+    for name in asked:
+        found = name if name in outputs else name.split(".", 1)[0]
+        if found in outputs:
+            picked.add(found)
+        else:
+            bad.append(name)
+    if bad:
+        raise CliError(
+            "INVALID_INPUT",
+            f"{job_id} has no output {', '.join(bad)}; its outputs: "
+            f"{', '.join(outputs) or 'none'} (amsyos result {job_id} <output> … fetches those)",
+        )
+    return picked
+
+
 async def show_result(
     out: Out,
     job_id: str,
@@ -485,18 +510,22 @@ async def show_result(
     download_files: bool = True,
     emit: bool = True,
     check: dict[str, Any] | None = None,
+    only: set[str] | None = None,
 ) -> Shown:
     """A succeeded job's outputs fetched into `folder/<job>/` and said (names, sizes,
     types, marks; never contents); an output that is no file (a task, a worker, an id) as
-    `name: value`; `check`: the version's check this job ran, with its tests. `emit=False`
-    leaves the saying to the caller."""
+    `name: value`; `check`: the version's check this job ran, with its tests; `only`: the
+    outputs to fetch (the others are named, not fetched). `emit=False` leaves the saying to
+    the caller."""
     outputs: dict[str, Any] = dict(obj(result.get("outputs")))
     links = {k: v for k, v in outputs.items() if is_link(v)}
     values = {k: v for k, v in outputs.items() if k not in links}
+    fetch = links if only is None else {k: v for k, v in links.items() if k in only}
     saved: list[Saved] = []
     root = Path.cwd()
-    if links and download_files and folder is not None:
-        saved = await download(links, folder / job_id)
+    if fetch and download_files and folder is not None:
+        saved = await download(fetch, folder / job_id)
+    left = [k for k in links if k not in fetch] if saved else []
     answer: dict[str, Any] = {
         "job_id": job_id,
         "state": "succeeded",
@@ -506,6 +535,8 @@ async def show_result(
         "files": [s.row(root) for s in saved],
         "assets": result.get("assets") or {},
     }
+    if left:
+        answer["not_fetched"] = left
     for key in ("data", "work", "steps", "marks", "vote", "then"):
         if result.get(key):
             answer[key] = result[key]
@@ -528,6 +559,11 @@ async def show_result(
             line + out.marks(marks.get(s.output))
             for s, line in zip(saved, describe_saved(saved, root), strict=True)
         ]
+        if left:
+            lines.append(
+                "not fetched: " + ", ".join(f"{k}{out.marks(marks.get(k))}" for k in left)
+                + f" (amsyos result {job_id} <output> fetches one)"
+            )  # fmt: skip
     elif links:
         lines.append("outputs: " + ", ".join(f"{k}{out.marks(marks.get(k))}" for k in links))
         if out.show_urls:

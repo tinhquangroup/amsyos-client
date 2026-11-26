@@ -4,7 +4,9 @@ works, take out what does not as a whole.
 - `amsyos pool [family]`: each own service, grouped by family, with where it runs, the
   version a bare id runs and its check, and over the last 30 days its runs, failure share,
   median time, credit spent, its last run and the disk it holds on own nodes
-  (`service.pool`);
+  (`service.pool`); a chain whose steps pin an older version of an own service than its
+  bare id runs now is marked `behind`, with the command that renews it (a customer,
+  2026-11-26);
 - `amsyos uninstall <service | family.*> [--version V] [--ignore-code-calls] [--yes]`:
   without `--yes` a dry run (`service.remove` with `dry_run`) saying everything that would go
   and the disk it frees; with `--yes` the removal, undoable for 7 days (a version's is
@@ -79,6 +81,9 @@ def _row(one: dict[str, Any], family: str) -> list[str]:
     dev = obj(one.get("channels")).get("dev")
     if dev and dev != version:
         version += f" (dev {dev})"
+    behind = seq(one.get("behind"))
+    if behind:  # steps that pin an older version of an own service than it runs now
+        version += f" ({len(behind)} behind)"
     share = one.get("failed_share")
     median = one.get("median_s")
     return [
@@ -143,6 +148,18 @@ def pool_lines(data: dict[str, Any]) -> list[str]:
         lines.append(
             f"node {node.get('name') or node.get('node')}: {_gb(node.get('builds_gb'))} of builds "
             "no deployment uses"
+        )
+    behind = [
+        str(one.get("service"))
+        for family in families
+        for one in (obj(s) for s in seq(family.get("services")))
+        if seq(one.get("behind"))
+    ]
+    if behind:
+        lines.append(
+            f"behind: {len(behind)} chain{'' if len(behind) == 1 else 's'} with steps that run an "
+            "older version of your service than it runs now; renew each: amsyos run "
+            f"service.define name={behind[0].split('.', 1)[-1]} renew=true"
         )
     if not families:
         lines.append(str(data.get("how") or "no service of yours yet"))

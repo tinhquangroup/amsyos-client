@@ -76,6 +76,7 @@ from amsyos_cli.jobs import (
     follow,
     hide_left,
     parse_value,
+    picked_outputs,
     request_lines,
     show_full_log,
     show_logs,
@@ -538,6 +539,7 @@ async def cmd_status(args: argparse.Namespace, out: Out) -> int:
 
 
 async def cmd_result(args: argparse.Namespace, out: Out) -> int:
+    asked = [*args.names, *(n.strip() for n in (args.only or "").split(",") if n.strip())]
     async with Api(credentials(), out) as api:
         try:
             result = await api.result(args.job)
@@ -545,14 +547,15 @@ async def cmd_result(args: argparse.Namespace, out: Out) -> int:
             if exc.code not in {"JOB_FAILED", "JOB_CANCELLED"}:
                 raise
             return failed_result(out, args.job, exc)
+        only = picked_outputs(args.job, result, asked)
         if not args.apply:
             shown = await show_result(
                 out, args.job, result, Path(args.out),
                 download_files=not (args.list or args.no_download),
-                check=await check_of(api, args.job, result),
+                check=await check_of(api, args.job, result), only=only,
             )  # fmt: skip
             return shown.code
-        shown = await show_result(out, args.job, result, Path(args.out), emit=False)
+        shown = await show_result(out, args.job, result, Path(args.out), emit=False, only=only)
         found = patches.patches(shown.saved, {})
         if not found:
             found = patches.patches(shown.saved, await patches.means_of(api, result))
@@ -2168,16 +2171,27 @@ def parser() -> Parser:
     p = add(
         "note", around.cmd_note, "post or list the workspace's notes, decisions and asks",
         'note post <topic> "<text>" [--kind info|decision|ask]: a note the others see (their '
-        "around says it); note ls [topic] [--since n_…|time] [--limit 20] (spec v3 §10)",
+        "around says it); note ls [topic] [--since n_…|time] [--limit 20] (spec v3 §10). The "
+        "topic goes first, without a key (topic=film/part-3 is taken as film/part-3)",
     )  # fmt: skip
     p.add_argument("action", choices=["post", "ls"])
-    p.add_argument("topic", nargs="?", help="what it is about, e.g. film/part-3")
+    p.add_argument("topic", nargs="?", help="what it is about, e.g. film/part-3 (no '=')")
     p.add_argument("text", nargs="?", help="the note (post)")
     p.add_argument("--kind", choices=["info", "decision", "ask"], default="info")
     p.add_argument("--since", help="ls: after this note id or time")
     p.add_argument("--limit", type=int, default=20, help="ls: at most this many (1-100)")
-    p = add("result", cmd_result, "a finished job's outputs, fetched into <out>/<job>/")
+    p = add(
+        "result", cmd_result, "a finished job's outputs, fetched into <out>/<job>/",
+        "a finished job's outputs, fetched into <out>/<job>/. Name outputs to fetch only "
+        "those: amsyos result <job> report sheet (or --only report,sheet); the others are "
+        "named, not fetched. --list names every output and fetches nothing; its 'as inputs' "
+        "line gives each file's asset://…, and amsyos files get asset://… fetches that one",
+    )  # fmt: skip
     p.add_argument("job")
+    p.add_argument(
+        "names", nargs="*", metavar="output", help="fetch only these outputs (default: all)"
+    )
+    p.add_argument("--only", metavar="NAME,…", help="as the names after <job>, comma-separated")
     p.add_argument("--out", default="out", help="default ./out")
     p.add_argument("--list", action="store_true", help="name the outputs, fetch nothing")
     p.add_argument("--no-download", action="store_true", help="as --list: fetch nothing")
@@ -2226,7 +2240,11 @@ def parser() -> Parser:
     fsub = p.add_subparsers(dest="files_cmd", metavar="put|get|ls", required=True)
     fp = fsub.add_parser("put", parents=[common], help="upload local files the workspace lacks")
     fp.add_argument("paths", nargs="+")
-    fg = fsub.add_parser("get", parents=[common], help="fetch a file: asset://…")
+    fg = fsub.add_parser(
+        "get", parents=[common], help="fetch a file: asset://…",
+        description="fetch a file: asset://…; a job's one output: amsyos result <job> --list "
+        "names each output's asset://… (or amsyos result <job> <output> fetches it)",
+    )  # fmt: skip
     fg.add_argument("asset")
     fg.add_argument("--out", default="out", help="default ./out")
     fl = fsub.add_parser("ls", parents=[common], help="list files, newest first")

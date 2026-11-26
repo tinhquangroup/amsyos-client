@@ -31,13 +31,19 @@ Each call is one run of the image's `command` in its source folder, as an unpriv
 
 | Path | What |
 |---|---|
-| `job.json` | `{"params": {...}, "inputs": {"<name>": "in/<file>"}, "service": {"id", "version"}}`: params checked, defaults filled in; `service` says which service the job is for (an image several services share tells their jobs apart by it; additive, a job may ignore it) |
+| `job.json` | `{"params": {...}, "inputs": {"<name>": "in/<file>"}, "service": {"id", "version"}, "limits": {"cpus", "gpu_mem_gb"}}`: params checked, defaults filled in; `service` says which service the job is for (an image several services share tells their jobs apart by it; additive, a job may ignore it); `limits` what the job may use of its machine (below; rented node) |
 | `in/` | the input files |
 | `out/<output>.<ext>` | one file an output, as the card declares it (one it marks `optional: true` may be left out); at most 2 GB in all a job: over it the job fails `OUTPUT_TOO_BIG`, naming each file and its size (empty files and files over it are not kept as a failed job's partial files) |
 | `progress` | optional, 0 to 100 |
 | `error.json` | optional, `{"error": "INVALID_PARAMS" or "SERVICE_ERROR", "hint": "..."}` with exit code 1: what the caller reads to fix its call |
 
 A job may run while the rented node is up (at least one hour; a job past its limit fails `TIMEOUT` with its partial files and its log's end). The machine has a GPU and the Internet; no AMSYOS key is on it.
+
+**What the job may use of its machine.** `os.cpu_count()` and `nproc` say the host's cores, not the job's: a customer's job saw 112 on a machine held to 13.4 cores, started six renderers and was throttled (2026-11-23). On a rented node each job is told its own, in its environment and in `job.json`:
+- `AMSYOS_CPUS` (also `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `NUMEXPR_NUM_THREADS`) and `limits.cpus`: the cores its card declares (`resources.cpu`), never more than the machine's. The machine's cores are the fewest of what it was rented with, its container's CPU quota (cgroup `cpu.max`) and the CPUs it may run on. Start that many processes or threads.
+- `AMSYOS_GPU_MEM_GB` and `limits.gpu_mem_gb`: the GPU memory the job may count on. That is its card's `resources.vram_gb` (made free on the GPU before it starts), or the whole GPU's when the card declares none. Neither is there with `gpu: none` or on a machine without a GPU.
+
+A server kept warm is told them when it starts, the same for each of its jobs. An own node does not set them yet. It holds a job to its declared cores where the system allows it (a cgroup scope on Linux, a job object on Windows), so read `cpu.max` of the job's cgroup there.
 
 **Languages.** `node.build` takes:
 - `runtime`: python (the default: Python 3.11 with PyTorch), node, java, go or r, installed from pinned conda-forge packages without root;

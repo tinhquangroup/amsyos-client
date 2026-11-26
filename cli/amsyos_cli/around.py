@@ -366,11 +366,28 @@ async def cmd_lease(args: argparse.Namespace, out: Out) -> int:
     return 0
 
 
+def note_topic(topic: str | None) -> str | None:
+    """A note's topic as typed: `topic=…`, the service's own k=v form, is the topic after it
+    (a customer, 2026-11-26: `note post topic=lesson/animation` saved the literal text as the
+    topic); a topic that still holds '=' is refused with the form to type."""
+    if topic is None:
+        return None
+    topic = topic.removeprefix("topic=")
+    if "=" in topic:
+        raise CliError(
+            "INVALID_INPUT",
+            f"note topic {topic!r} holds '=': the topic goes first, without a key: "
+            'amsyos note post lesson/animation "<text>" [--kind info|decision|ask]',
+        )
+    return topic
+
+
 async def cmd_note(args: argparse.Namespace, out: Out) -> int:
     """`amsyos note post <topic> <text> [--kind]` / `amsyos note ls [topic]` (spec v3 §10):
     the workspace's shared notes, decisions and questions."""
     from amsyos_cli.api import Api  # noqa: PLC0415
 
+    args.topic = note_topic(args.topic)
     async with Api(credentials(), out) as api:
         if args.action == "post":
             if not args.topic or not args.text:

@@ -581,14 +581,19 @@ def fetch_models(asked: dict[str, object], env: Path, base: Path) -> None:
 
 def setup(asked: dict[str, object], src: Path, env: Path, base: Path) -> None:
     """The card's `setup`, in the code's folder, with the environment as a job has it (run.sh):
-    its bin/ first on PATH, its lib/ not on LD_LIBRARY_PATH ($CONDA_PREFIX/lib)."""
+    its bin/ first on PATH, its lib/ ($CONDA_PREFIX/lib) first on LD_LIBRARY_PATH, before what
+    was there (a customer, 2026-11-26: a program setup ran found no libQt5Core.so.5 of the
+    card's `system`)."""
     command = str(asked.get("setup") or "").strip()
     if not command:
         return
     path = f"{src / '_node' / 'bin'}:{env / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+    held = os.environ.get("LD_LIBRARY_PATH")
+    libs = f"{env / 'lib'}:{held}" if held else str(env / "lib")
     env_vars = dict(
         os.environ, PATH=path, CONDA_PREFIX=str(env), PREFIX=str(env), HF_HOME=str(base / "hf"),
         AMSYOS_FETCH_STORE=str(base / "fetched"), PYTHONDONTWRITEBYTECODE="1",
+        LD_LIBRARY_PATH=libs,
     )  # fmt: skip
     run(["/bin/sh", "-c", command], "setup", "the card's setup failed; its words above say why",
         cwd=str(src), env=env_vars)  # fmt: skip

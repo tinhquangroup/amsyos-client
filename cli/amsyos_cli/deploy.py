@@ -17,7 +17,8 @@
 6. print `service@version`, the build and check jobs, the check, and the cost; `--close`
    gives the space back after; then how to run it: the bare id when it runs this version,
    else `service@version`, the version the bare id still runs (stable) and the promote
-   command (a customer's feedback).
+   command (a customer's feedback); and the organisation's chains that still pin an older
+   version of it (`behind`), each with the command that renews it (a customer, 2026-11-26).
 
 With `where: node` (an own node, spec v3 §17; `--node n_…` when the organisation has
 several), steps 4-5 are instead: build the environment and the image on that node by
@@ -549,6 +550,32 @@ def run_lines(service_id: str, version: str, runs: str | None) -> tuple[str, lis
     ]
 
 
+MOST_BEHIND = 20  # chains behind a service printed after its define (--json has each)
+
+
+def behind_lines(data: dict[str, Any], pad: str = "  ") -> list[str]:
+    """A customer, 2026-11-26: the organisation's chains that still pin an older version of
+    the service just defined (`behind` in what the define answered), each with the command
+    that renews it: its next patch version, its steps at the versions they run now."""
+    behind = [obj(b) for b in seq(data.get("behind"))]
+    if not behind:
+        return []
+    lines = [
+        f"{pad}{len(behind)} chain{'' if len(behind) == 1 else 's'} of yours still "
+        f"run{'s' if len(behind) == 1 else ''} an older version of it; renew each (its next "
+        "patch version, checked as any define):"
+    ]
+    for b in behind[:MOST_BEHIND]:
+        chain = str(b.get("service") or "?")
+        lines.append(
+            f"{pad}  {chain}@{b.get('version')} pins {b.get('pins')}: amsyos run "
+            f"service.define name={chain.split('.', 1)[-1]} renew=true"
+        )
+    if len(behind) > MOST_BEHIND:
+        lines.append(f"{pad}  … {len(behind) - MOST_BEHIND} more (--json lists every one)")
+    return lines
+
+
 def stable_of(data: dict[str, Any]) -> str | None:
     """The version `stable` points at, from what the define answered (kernel/offers.py
     `_move`: `channels` only once a stable is set; none, the bare id runs the newest)."""
@@ -1024,6 +1051,7 @@ async def _build(  # noqa: PLR0917 - the deploy's state, passed on
     if ref != made:
         answer["bare_runs"] = stable
     lines += said
+    lines += behind_lines(data)
     return 0, lines
 
 
@@ -1855,6 +1883,9 @@ async def define_on_image(  # noqa: PLR0917 - the deploy's state, passed on
         ref, said = run_lines(service_id, version, stable_of(defined))
         entry["run"] = ref
         lines += [f"  {s}" for s in said]
+        if defined.get("behind"):
+            entry["behind"] = defined["behind"]
+        lines += behind_lines(defined)
     return ok, told, lines
 
 
@@ -2593,7 +2624,11 @@ async def deploy_node(
     if too_old:
         lines.append(f"  {NODE_UPDATE}")
     answer["cards"] = [
-        {k: e[k] for k in ("dir", "service", "version", "plan", "check", "run", "error") if k in e}
+        {
+            k: e[k]
+            for k in ("dir", "service", "version", "plan", "check", "run", "behind", "error")
+            if k in e
+        }
         | ({"version": e.get("current")} if e["plan"] == UNCHANGED else {})
         for e in chosen
     ]
@@ -2629,9 +2664,12 @@ def _card_lines(entry: dict[str, Any], *, multi: bool) -> tuple[bool, list[str],
         return False, lines, too_old
     if state == "running":
         lines.append(f"  check running: amsyos describe {ref} says when it ends")
-    run, said = run_lines(entry["service"], entry["version"], stable_of(obj(entry.get("defined"))))
+    defined = obj(entry.get("defined"))
+    run, said = run_lines(entry["service"], entry["version"], stable_of(defined))
     entry["run"] = run
-    return True, lines + [pad + s for s in said], too_old
+    if defined.get("behind"):
+        entry["behind"] = defined["behind"]
+    return True, lines + [pad + s for s in said] + behind_lines(defined, pad + "  "), too_old
 
 
 def _remember_cards(  # noqa: PLR0917 - the deploy's state, passed on

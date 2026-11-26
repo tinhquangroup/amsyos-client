@@ -170,11 +170,13 @@ The links are signed by the kernel for this job and this node only, and expire.
   PYTHONPATH first. `run` writes the module when it can and otherwise says to run `setup`
   again, as it does when `amsyos-job` is not this program's copy.
 - **A service `amsyos deploy` built here** (the card's `where: node`) runs its command through
-  `_node/run.sh` in its image's folder, the environment's `bin/` first on `PATH` and
-  `CONDA_PREFIX` the environment; its `lib/` is not on `LD_LIBRARY_PATH`, in a job or in
-  `setup`, so the system's programs keep their own libraries: a pip wheel's program that needs
-  a library of the card's `system` (Chromium: nss, gbm) is started with
-  `LD_LIBRARY_PATH=$CONDA_PREFIX/lib`.
+  `_node/run.sh` in its image's folder, the environment's `bin/` first on `PATH`, its `lib/`
+  first on `LD_LIBRARY_PATH` (before what was there) and `CONDA_PREFIX` the environment, in a
+  job and in `setup` (a customer, 2026-11-26: a program found no library of the card's
+  `system`). A system program a job calls then loads the environment's copy of a
+  library both have (git, bash, tar and python3 run as before; curl warns "no version
+  information available" and runs). Start one that must keep the system's libraries with
+  `LD_LIBRARY_PATH` unset.
 - **Builds (2.1.5).** `amsyos deploy` builds as the node's own account (`node.exec`) under
   `AMSYOS_BUILD_HOME`, by default `~/amsyos-build`: `images/<image>@<version>/` (its
   `_node/where.env` names its environment, `ENV_DIR=…/envs/<key>`), `envs/<key>/`, and `hf/`,
