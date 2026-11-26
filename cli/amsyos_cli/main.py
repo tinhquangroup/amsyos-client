@@ -106,6 +106,9 @@ RUN_WAIT_S = 5
 # What a started job's answer may carry in `data` (mission.run: how its ETA was reached, from
 # its plan's steps): an account of the job to come, not an answer given at once.
 ETA_KEYS = frozenset({"eta_basis", "eta_steps", "eta_leaves_out"})
+# Said beside a job that started, never its answer: the rented node its call woke and what that
+# costs (a customer, 2026-11-26: `run --wait` took a wake for an answer and exited at once).
+BESIDE_KEYS = frozenset({"woke", "opening_costs"})
 
 
 # ---------------------------------------------------------------- identity
@@ -377,6 +380,15 @@ async def cmd_run(args: argparse.Namespace, out: Out) -> int:
         said = f"{job_id}: started, {eta}, est. cost {amount(cost)}"
         left_out = obj(started.get("data")).get("eta_leaves_out")
         asked = [*([f"its eta leaves out {left_out}"] if left_out else []), *request_lines(started)]
+        woke = obj(started.get("data")).get("woke")
+        if isinstance(woke, str) and woke:
+            costs = obj(obj(started.get("data")).get("opening_costs"))
+            extra = (
+                f" (the node: {amount(costs.get('at_least'))} to {amount(costs.get('at_most'))})"
+                if costs.get("at_least") is not None
+                else ""
+            )
+            asked.insert(0, f"{woke}{extra}")
         if asked:
             out.note("\n".join(asked))
         if not args.wait:
@@ -470,7 +482,7 @@ def _answered(started: dict[str, Any]) -> bool:
     if started.get("outputs"):
         return True
     if isinstance(data, dict) and data:
-        return bool(set(obj(data)) - ETA_KEYS)
+        return bool(set(obj(data)) - ETA_KEYS - BESIDE_KEYS)
     return data is not None
 
 
