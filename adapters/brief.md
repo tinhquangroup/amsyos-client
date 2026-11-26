@@ -18,15 +18,14 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
 - A long job: `amsyos wait <job>` (a person's approval too; `--timeout s`), `status`, `result`, `logs
   [-f]`, `cancel`; never poll. `work show|resume <job>`: a recipe's steps, rerun what failed. A local
   command over a minute: `amsyos bg start -- <cmd>`; a check due later: `amsyos later add "<what>" --in 2h`.
-- Files: `amsyos files put <paths>|get <asset://...>|ls`; mark `face`: may show a real person.
+- Files: `amsyos files put <paths>|get <asset://...>|ls`, `result <job> <output>`; mark `face`: may show a real person.
 - This repository as a service: `amsyos init` binds it and proposes `amsyos.yaml` (fill each
   `<fill: ...>`; `card --help`: every key); a desk: `--type studio` (builds many services) or `work`
   (uses them). `card --check` (AMSYOS too) and `run --local` are free; MACHINE_TOO_SMALL: `deploy
   --dry-run`, `deploy [--channel stable]` on a rented or own node; `promote <service> <version>`;
   `contract <gp_...|service|need>`: what a build must meet; `pool`: runs, cost, disk; `compare <id>`:
   two versions measured; `uninstall <id|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h]
-  [--gpu none]|extend|close`; `node exec <node> "<cmd>"|--script x.ps1 [--get out/a.csv]` on your own
-  node. One output: `amsyos result <job> <output>`. A patch: `amsyos result <job> --apply`, `git apply --3way`.
+  [--gpu none]|extend|close|exec <node> "<cmd>"|--script x.ps1`. Patch: `result <job> --apply`, `git apply --3way`.
 - Beside others: read `around:` lines before you act on shared things; `amsyos around`, `status
   "<doing>"`, `note.post|list`, `lease.take what=<x>`|`release`, `watch --note|--free|--handover`. Need
   another machine or organisation: `amsyos ask <t_x|w_x> "<what>"`; answer: `amsyos reply <rq_…> "<text>"`.
