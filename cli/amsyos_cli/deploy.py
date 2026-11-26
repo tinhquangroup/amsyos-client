@@ -65,7 +65,7 @@ from typing import Any
 
 import httpx
 
-from amsyos_cli import around, repo
+from amsyos_cli import around, naming, repo
 from amsyos_cli import card as cards
 from amsyos_cli.api import Api, idempotency_key, refused_field
 from amsyos_cli.common import CliError, Credentials, Out, amount, obj, seq, short
@@ -457,6 +457,16 @@ async def checked_problems(
     return found
 
 
+def name_warnings_here(out: Out, entries: list[dict[str, Any]]) -> None:
+    """The naming standard's warnings of each card (naming.py), said here when AMSYOS's
+    service.check, which says them with the organisation known, is not asked (a dry run
+    not logged in); kept in the JSON answer as `checked_problems` keeps its own."""
+    for entry in entries:
+        for warning in naming.card_warnings(entry["card"]):
+            out.note(f"warning: {_at(entry)}{warning}")
+            out.extra.setdefault("card_warnings", []).append(f"{_at(entry)}{warning}")
+
+
 # ---------------------------------------------------------------- a version's check
 def remember_check(root: Path, job: str, ref: str) -> None:
     """The check job of a version deployed here, so that `status` and `result` of that job
@@ -811,6 +821,7 @@ async def dry_run(
             f"channel {channel}"
         )
     else:
+        name_warnings_here(out, [{"dir": ".", "card": card}])
         answer["disk"], said = await disk_need(root, made, {})
         lines.append(said)
         lines.append(f"would build {card['service']} (not logged in: the version is not known)")
@@ -2484,6 +2495,8 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
                 problems.append(_at(entry) + exc.hint)
     if api is not None and todo:
         problems += await checked_problems(api, todo, "node")
+    elif todo:
+        name_warnings_here(out, todo)
     if problems:
         raise CliError(_problem_code(problems), "; ".join(problems), {"problems": problems})
     there = f"<the folder of {build['image']}@{version}>" if build_now else image_dir

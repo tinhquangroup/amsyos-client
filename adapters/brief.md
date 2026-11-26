@@ -26,6 +26,7 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   <version>`; `contract <gp_...|service|need>`: what a build must meet; `pool`: runs, cost, disk; `compare <id>`:
   two versions measured; `uninstall <id|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h] [--gpu
   none]|extend|close|exec <node> "<cmd>"|--script x.ps1`. Patch: `result <job> --apply`, `git apply --3way`.
+- A service's name: `area.action` or `area.group.action` (blender.render), never the org, a version or a model.
 - A structured input is one JSON input with a schema: `amsyos schema <input> --from-model f.py:Model|--from-example`.
 - Beside others: read `around:` lines before you act on shared things; `amsyos around`, `status
   "<doing>"`, `note.post|list`, `lease.take what=<x>`|`release`, `watch --note|--free|--handover`. Need

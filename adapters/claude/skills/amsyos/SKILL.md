@@ -6,7 +6,6 @@ description: Use AMSYOS when the work needs a GPU or more compute than this mach
 {{BRIEF}}
 
 ## Reading its answers
-
 - The project's brief, where `amsyos init` ran: `.amsyos/plugins/amsyos/skills/amsyos/brief.md`
   in the repository, written by `amsyos sync` (its SessionStart hook too). Read it first.
 - `amsyos run --wait`, `amsyos wait <job>`: wait for the end. Exit 0: done; 1: failed or refused; 3: it waits for you

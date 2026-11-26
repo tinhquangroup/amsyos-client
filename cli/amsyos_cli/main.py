@@ -15,7 +15,7 @@ from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-from amsyos_cli import __version__, around, brief, repo, standards
+from amsyos_cli import __version__, around, brief, naming, repo, standards
 from amsyos_cli import adapters as hosts
 from amsyos_cli import card as cards
 from amsyos_cli import local as local_run
@@ -91,6 +91,7 @@ from amsyos_cli.later import add_parsers as add_later
 from amsyos_cli.login import host_of, login
 from amsyos_cli.overview import overview, session_show
 from amsyos_cli.pool import cmd_pool, cmd_restore, cmd_uninstall
+from amsyos_cli.rename import add_parser as add_rename
 from amsyos_cli.schema import add_parser as add_schema
 from amsyos_cli.secret import add_parsers as add_secret
 from amsyos_cli.shell import cli_hint, quoted
@@ -1209,7 +1210,15 @@ async def cmd_init(args: argparse.Namespace, out: Out) -> int:
         async with Api(creds, out) as api:
             if not left and not args.no_check:
                 lines += await _check_card(api, card, answer, root)
+            else:  # the name, with the organisation known (service.check says it otherwise)
+                try:
+                    tenant: str | None = await tenant_of(api)
+                except CliError:
+                    tenant = None
+                lines += _name_warnings(card, answer, tenant)
             lines += await _bind(api, desk or root, answer)
+    else:
+        lines += _name_warnings(card, answer, None)
     if desk is not None:
         # The desk's rules and adapters serve its services' folders; none are written here.
         answer["desk"] = str(desk)
@@ -1254,6 +1263,15 @@ def _mcp_tool(path: str) -> dict[str, Any]:
             "INVALID_INPUT", f"{path} is not JSON ({exc}): give the tool's definition as JSON"
         ) from None
     return cards.tool_of(given, path)
+
+
+def _name_warnings(card: dict[str, Any], answer: dict[str, Any], tenant: str | None) -> list[str]:
+    """The naming standard's warnings of the card's service (naming.py), said here only when
+    AMSYOS's service.check, which says them with the organisation known, was not asked."""
+    warned = naming.card_warnings(card, tenant)
+    if warned:
+        answer["warnings"] = [*seq(answer.get("warnings")), *warned]
+    return [f"  warning: {w}" for w in warned]
 
 
 async def _check_card(
@@ -1467,7 +1485,8 @@ async def cmd_card(args: argparse.Namespace, out: Out) -> int:
         if not named:
             raise CliError(
                 "INVALID_CARD",
-                f"service: 2 to 4 snake_case words with dots, like csv.chart, in {cards.CARD}",
+                f"service: area.action or area.group.action, snake_case words with dots, like "
+                f"csv.chart, in {cards.CARD}",
                 {"fields": ["service"]},
             )
         if args.upload and cards.local_files(card.get("example")):
@@ -1507,6 +1526,7 @@ async def cmd_card(args: argparse.Namespace, out: Out) -> int:
     except CliError as exc:
         creds = None
         answer["remote"] = exc.code
+        lines += _name_warnings(card, answer, None)  # else in service.check's warnings
         lines.append(f"not checked by AMSYOS ({exc.code}): amsyos login, then card --check again")
     remote_ok = True
     if creds is not None and not named:
@@ -2155,6 +2175,7 @@ def parser() -> Parser:
         "(amsyos deploy)",
     )  # fmt: skip
     p.add_argument("service", help="t_x.name, name (yours), or a family: name.*")
+    add_rename(add)  # a service of yours to a new id, the old one an alias (2026-11-26)
 
     add_git(add, common)  # spec v3 §18: amsyos repo …, amsyos git-credential
     top.commands.update(add_bg(add, common))  # watched background tasks (2026-11-25)

@@ -22,11 +22,11 @@ from typing import Any
 
 import yaml
 
-from amsyos_cli import infer, standards
+from amsyos_cli import infer, naming, standards
 from amsyos_cli.common import CliError, obj, seq
 
 CARD = "amsyos.yaml"
-NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,47}(\.[a-z][a-z0-9_]{0,47}){1,3}")
+NAME_RE = naming.NAME_RE  # area.action or area.group.action (4 words warned, naming.py)
 VERSION_RE = re.compile(r"\d{1,6}\.\d{1,6}(\.\d{1,6})?")  # "1.0", or "1.0.3"
 FILL = "<fill"  # what init could not read from the code starts so
 RUNTIMES = ("python", "node", "java", "go", "r")
@@ -124,8 +124,16 @@ amsyos.yaml: this repository as an AMSYOS service (spec v3 §7.1). One file at t
 repository's top; `amsyos init` proposes it from the code, `amsyos deploy` builds it.
 Values init could not read from the code are written <fill: ...>: deploy refuses them.
 
-  service     2 to 4 snake_case words with dots, like csv.chart. Becomes
-              t_<organisation>.csv.chart; it is what `amsyos run` names.
+  service     area.action, or area.group.action: snake_case words with dots, like
+              blender.render or blender.template.logo. Becomes
+              t_<organisation>.blender.render; it is what `amsyos run` names. area: the
+              tool or the domain a client looks under (blender, video, sound, invoice),
+              never your organisation's name nor a word all its services share; group: a
+              product line inside the area; action: what it does (render, find,
+              apply_plan, make; a catalogue's is list). No version, model, date or round
+              (version and the channels dev and stable carry them; experiments go on
+              dev). card --check warns of a name off the standard and suggests one; a
+              deployed service moves with amsyos rename <old> <new>.
   version     "major.minor" ("1.0") or "major.minor.patch" ("1.0.3"), in quotes. With
               two numbers deploy counts the patch: one more than the newest defined of
               that major.minor. Raise the minor for a change callers should notice.
@@ -318,7 +326,10 @@ def problems(card: dict[str, Any]) -> list[str]:
     found: list[str] = []
     name = card.get("service")
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-        found.append("service: 2 to 4 snake_case words with dots, like csv.chart")
+        found.append(
+            "service: area.action or area.group.action, snake_case words with dots, like "
+            "csv.chart (`amsyos card --help`, service)"
+        )
     if not VERSION_RE.fullmatch(str(card.get("version", ""))):
         found.append('version: "1.0" (deploy counts the patch) or "1.0.3", in quotes')
     if "image" in card and not (
@@ -984,7 +995,8 @@ def _sample_for(root: Path, means: str) -> str | None:
 # T2, 2026-11-20: a folder `amsyos-trial-demo` whose README is titled "csv-rowcount" was
 # named `amsyos.trial_demo`, and its docstring's "csv-rowcount:" became the summary
 # "Csv-rowcount:". The name comes from the README's title, then the entry file's docstring,
-# then the folder; the summary is the first sentence of the README, then of the docstring.
+# then the folder (naming.propose makes it area.action, the owner's standard of 2026-11-26);
+# the summary is the first sentence of the README, then of the docstring.
 PLATFORM = "amsyos"  # a name that starts with it (amsyos-trial-demo) drops it
 NOT_TITLES = frozenset({
     "readme", "usage", "note", "notes", "example", "examples", "summary", "description",
@@ -1006,18 +1018,16 @@ def fold(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
-def slug(text: str, *, most: int | None = None) -> str | None:
-    """A card's service name from a title or a folder's name: `csv-rowcount` → csv.rowcount,
-    `amsyos-trial-demo` → trial.demo. None when nothing is left, or more than `most` words."""
+def name_words(text: str, *, most: int | None = None) -> list[str] | None:
+    """The words a card's service is named from, of a title or a folder's name:
+    `csv-rowcount` → [csv, rowcount], `amsyos-trial-demo` → [trial, demo] (naming.propose
+    makes the name). None when nothing is left, or more than `most` words."""
     words = [w for w in re.split(r"[^a-z0-9]+", fold(text).lower()) if w]
     if len(words) > 1 and words[0] == PLATFORM:
         words = words[1:]
     if not words or (most is not None and len(words) > most):
         return None
-    words = [w if w[0].isalpha() else f"s{w}" for w in words]
-    if len(words) == 1:
-        return f"{words[0][:40]}.run"
-    return f"{words[0][:40]}.{'_'.join(words[1:])[:47]}"
+    return words
 
 
 def _a_title(text: str | None) -> str | None:
@@ -1176,13 +1186,13 @@ def _section(line: str) -> bool:
     return bool(sep) and fold(head).strip().lower() in NOT_TITLES
 
 
-def described(root: Path, command: str | None) -> tuple[str | None, str | None]:
-    """(name, summary) the README and the entry file's docstring give, each None when
-    neither says it."""
+def described(root: Path, command: str | None) -> tuple[list[str] | None, str | None]:
+    """(the words of its name, summary) the README and the entry file's docstring give,
+    each None when neither says it."""
     readme_title, readme_text = _readme(root)
     doc_title, doc_text = _docstring(root, command)
     name = next(
-        (n for t in (readme_title, doc_title) if t and (n := slug(t, most=MOST_TITLE_WORDS))),
+        (n for t in (readme_title, doc_title) if t and (n := name_words(t, most=MOST_TITLE_WORDS))),
         None,
     )
     names = repo_names(root)
@@ -1418,7 +1428,6 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
     runtime, command, serve, setup = detect_runtime(root)
     found, text = read_code(root, command or serve)
     named, summary = described(root, command or serve)
-    service = name or named or slug(root.resolve().name) or "my.run"
     notes: list[str] = []
     inputs: dict[str, Any] = {}
     files, params = found.ordered()
@@ -1556,6 +1565,12 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
             "no input found in the code (no job.json, amsyos module, amsyos-job, argparse "
             "or sys.argv read): add each input a call gives, or leave inputs empty"
         )
+    # By the naming standard (naming.py): area.action, never the organisation or a version.
+    service = name or naming.propose(
+        named or name_words(root.resolve().name) or [],
+        [program_name(c) for c in found.commands] + _MODULE_IMPORT.findall(text),
+        {n: str(obj(o).get("means") or "") for n, o in outputs.items()},
+    )
     card: dict[str, Any] = {
         "service": service,
         "version": "1.0",
@@ -1901,7 +1916,7 @@ def _flow(value: Any) -> str:
 
 # Each top-level key: what it is, in a comment on its line, and a sample when it is unset.
 TEMPLATE: tuple[tuple[str, str, str], ...] = (
-    ("service", "2 to 4 snake_case words with dots; called t_<organisation>.<service>", ""),
+    ("service", "area.action or area.group.action; called t_<organisation>.<service>", ""),
     ("version", '"1.0" (deploy counts the patch) or "1.0.3", in quotes', '"1.0"'),
     ("summary", "what one call takes and makes, English, 3 to 120 characters", ""),
     ("tags", "words discover also finds it by", "[csv, chart]"),

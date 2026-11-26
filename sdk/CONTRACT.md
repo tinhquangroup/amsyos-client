@@ -14,6 +14,29 @@ Everything else is as it always was: `inputs` (types, defaults, limits), `output
 
 `service.check {spec}` reports every problem at once before anything is defined. It also says which services the caller may use make each input type and which take each output type: where the planner would put the service. Services registered before contract 1 keep running; `describe` says what they lack.
 
+### Naming a service
+
+A service id is `t_<org>.<area>.<action>`, with at most one group between: `t_<org>.<area>.<group>.<action>`. So a card's `service` is `area.action` or `area.group.action`; four words are still accepted, with a warning (the owner, 2026-11-26).
+
+- **area**: the tool or the domain a client looks under: `blender`, `video`, `sound`, `pixabay`, `invoice`. Never the organisation's own name, nor a word all its services share.
+- **group** (optional): a product line inside the area: `template`, `rig2d`.
+- **action**: what it does, a verb or a verb_object: `render`, `find`, `apply_plan`, `make`. A catalogue's action is `list`.
+- **Not in a name**: versions, models, dates, rounds. `version` and the channels (`dev`, `stable`) carry those, and experiments go on the `dev` channel.
+
+`t_x.blender.template.logo` is right; `t_x.x.blender.squishy` should be `t_x.blender.squishy`. `service.check` and `service.define` warn of a name off the standard and never refuse it; `amsyos card --check`, `init` and `deploy` print the same warnings. Each problem is said once, with its code:
+
+| Code | When | Suggested |
+|---|---|---|
+| `org_repeat` | the first word is the organisation's name, `org` or `tenant` | without it |
+| `repeat` | a word is the word before it | without the repeat |
+| `too_deep` | more than 3 words | none of its own: at most area.group.action |
+| `versioned` | a word is `v<digits>`, ends `_v<digits>`, ends in two or more digits that begin with 0 (`review02`), holds a year (19xx or 20xx), or is a model with digits (`qwen4b`, `llama3`, `gpt4o`, `sdxl`, `flux1`) | the word without it, or no word when nothing is left |
+| `scratch` | a word is test, tmp, temp, demo, stub, scratch, wip, old, new, final or copy | none: a stable service's name says what it does |
+
+`mp4`, `h264`, `rig2d`, `film3d`, `base64`, `utf8`, `md5` and `s3` are words of a domain, not versions. The suggested id drops the organisation's word, then the versions, then a repeat; none is given when fewer than 2 words would be left. `service.check` says it in `suggested_id`. `amsyos init` proposes a name by the standard: its area is the main tool the code uses, or the folder's or the README's first word; its action comes from the other words or from what the code makes.
+
+A service that exists moves to a new id with `amsyos rename <old> <new>` (whole ids or the card's words; `service.rename` for a manager), which moves every version, its channels and checks, and rewrites `service:` in amsyos.yaml when run in the card's folder. The old id stays an alias: calls, describe (which says `renamed_to`), steps, plans and offers that name it run the new one, and a node that has the old id deployed keeps taking its jobs until you deploy under the new id. Renaming back to an old id removes that alias.
+
 ## 2. Four shapes, one card
 
 | Shape | How it is made | Its files are typed by |
