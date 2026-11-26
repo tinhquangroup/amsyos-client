@@ -44,7 +44,15 @@ from amsyos_cli.common import (
     short,
 )
 from amsyos_cli.compare import cmd_compare
-from amsyos_cli.deploy import DEPLOY_NODE_HELP, check_card, check_of, deploy, dry_run, tenant_of
+from amsyos_cli.deploy import (
+    DEPLOY_NODE_HELP,
+    check_card,
+    check_of,
+    deploy,
+    dry_run,
+    tenant_of,
+    upload_example,
+)
 from amsyos_cli.feedback import add_parser as add_feedback
 from amsyos_cli.feedback import logout_line
 from amsyos_cli.files import (
@@ -1361,12 +1369,16 @@ async def cmd_card(args: argparse.Namespace, out: Out) -> int:
                 f"service: 2 to 4 snake_case words with dots, like csv.chart, in {cards.CARD}",
                 {"fields": ["service"]},
             )
+        if args.upload and cards.local_files(card.get("example")):
+            # A customer, 2026-11-25: the spec named asset://a_example_file, uploaded by hand.
+            async with Api(credentials(), out) as api:
+                await upload_example(api, out, root, card)
         service = cards.for_check(card)
         out.emit(
             service,
             f"# the spec {cards.CARD} becomes, as service.check reads it (a build's service: "
             f"name, version, spec); an example's local file stands as {cards.EXAMPLE_FILE} "
-            "until deploy uploads it",
+            "until deploy uploads it (--upload: uploaded now, named by its asset)",
             json.dumps(service, ensure_ascii=False, indent=2),
         )
         return 0
@@ -1886,6 +1898,10 @@ def parser() -> Parser:
     p.add_argument(
         "--spec", action="store_true", help="print the spec the card becomes (service.check's)"
     )
+    p.add_argument(
+        "--upload", action="store_true",
+        help="with --spec: upload the example's local files ('@path') and name their assets",
+    )  # fmt: skip
     p.add_argument(
         "--export", choices=cards.EXPORTS,
         help="print the card as an MCP tool definition or an A2A Agent Card (made here)",

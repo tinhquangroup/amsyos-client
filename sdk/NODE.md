@@ -287,8 +287,10 @@ While it is on:
   what its deploy said until it is deployed again;
 - `node.exec` is unchanged;
 - what never changes: only a direct job of the owning organisation runs as the node's own
-  account. A job of an order (another organisation's buyer) and a step of a recipe or a
-  mission always run as `amsyos-job` (below);
+  account. A job of an order (another organisation's buyer) always runs as `amsyos-job`; so
+  does a step of a recipe or a mission, unless an admin of the organisation (or an agent of
+  one acting as a manager) asked for the whole of it, a rule's mission being its approver's
+  call: the kernel then sends that step as direct (below);
 - `amsyos-node try` runs a service as a direct job would.
 
 Each job run `as_node` is logged: its first `running` state carries `"as_node": true`, and the
@@ -392,7 +394,10 @@ It comes as a `job` message with `"service": "node.exec"` and an `exec` part:
 ### A job of an order, or a step
 
 The kernel adds `"direct": true` to a `job` message only for a call the organisation made
-itself (not a step of a recipe or a mission, not an order). The node runs an `as_node` service
+itself: never a job of an order, and a step of a recipe or a mission only when every job above
+it is the organisation's own, asked by one principal who is, when the step is sent, an admin of
+it (or an agent of one acting as a manager); a mission a rule started is the call of the rule's
+approver (2026-11-25). The node runs an `as_node` service
 (deployed `as_node`, or switched on at the machine while the default `as_node` is on) as its
 own account only for a direct job at `full`; every other job of it runs as `amsyos-job`. A
 `node.exec` that is not direct is refused.
