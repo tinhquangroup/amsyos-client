@@ -2384,11 +2384,14 @@ def _problem_code(problems: list[str]) -> str:
 
 
 def _gpu_card(top: dict[str, Any], chosen: list[dict[str, Any]]) -> dict[str, Any]:
-    """The card node_problems weighs a GPU by: one that requires it, else the top card."""
+    """The card node_problems weighs a GPU by: one of the cards deployed that requires it,
+    else one of them; the top card only when none is chosen. A customer, 2026-11-26:
+    `--only` of a `where: space` top card's own-node cards (gpu: none) was refused for the
+    top card's `gpu: required`, which was not being deployed."""
     for entry in chosen:
         if str(obj(entry["card"].get("resources")).get("gpu") or "none") == "required":
             return entry["card"]
-    return top["card"]
+    return chosen[0]["card"] if chosen else top["card"]
 
 
 def _need(build_now: bool, todo: list[dict[str, Any]], last: dict[str, Any]) -> str:
