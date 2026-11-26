@@ -25,7 +25,8 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   --dry-run`, `deploy [--channel stable]` on a rented or own node; `promote <service> <version>`;
   `contract <gp_...|service|need>`: what a build must meet; `pool`: runs, cost, disk; `compare <id>`:
   two versions measured; `uninstall <id|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h]
-  [--gpu none]|extend|close`. A patch output: `amsyos result <job> --apply`, then `git apply --3way`.
+  [--gpu none]|extend|close`; `node exec <node> "<cmd>"|--script x.ps1 [--get out/a.csv]` on your own
+  node. One output: `amsyos result <job> <output>`. A patch: `amsyos result <job> --apply`, `git apply --3way`.
 - Beside others: read `around:` lines before you act on shared things; `amsyos around`, `status
   "<doing>"`, `note.post|list`, `lease.take what=<x>`|`release`, `watch --note|--free|--handover`. Need
   another machine or organisation: `amsyos ask <t_x|w_x> "<what>"`; answer: `amsyos reply <rq_…> "<text>"`.

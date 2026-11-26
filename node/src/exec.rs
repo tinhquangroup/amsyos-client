@@ -38,6 +38,92 @@ pub struct Launch {
     /// Node 2.1.2: a server kept warm (serve.rs): where `amsyos-job next` keeps the job now.
     /// `job_dir` is then the server's own folder; its stdin is a pipe the node writes jobs to.
     pub serve_state: Option<PathBuf>,
+    /// Node 2.1.8: what the job is told it may use of the machine.
+    pub given: Given,
+}
+
+/// Node 2.1.8: what every job gets so that Python reads and writes UTF-8 whatever the
+/// machine's code page (a customer, 2026-11-26: Python services on a Windows node failed with
+/// "UnicodeEncodeError: 'charmap' codec can't encode character" printing Vietnamese text). A
+/// service's own command may set them otherwise.
+pub const UTF8_VARS: [(&str, &str); 2] = [("PYTHONUTF8", "1"), ("PYTHONIOENCODING", "utf-8")];
+
+/// The variables that tell a job its cores (sdk/CONTRACT.md §3), as a rented node's.
+pub const THREAD_VARS: [&str; 6] = [
+    "AMSYOS_CPUS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMEXPR_MAX_THREADS",
+];
+
+/// The variable that tells a job the GPU memory it may count on (sdk/CONTRACT.md §3).
+pub const GPU_VAR: &str = "AMSYOS_GPU_MEM_GB";
+
+/// Node 2.1.8: what a job may use of the machine (sdk/CONTRACT.md §3), told in its
+/// environment and in job.json `limits`, as on a rented node.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Given {
+    /// Its cores; 0: not told (the node's own checks as the job account, guard.rs).
+    pub cpus: u32,
+    /// The GPU memory it may count on, in GB, where known.
+    pub gpu_mem_gb: Option<f64>,
+}
+
+impl Given {
+    /// The cores: the fewest of what the job asked for (`limits.cpu`, rounded up) and what
+    /// the node allows jobs (`machine::cpus`: the CPUs it may run on and its cgroup's quota).
+    /// A job run as the node's own account (`node.exec`, an `as_node` service at `full`) is
+    /// held to none, and is told the node's. The GPU memory, for a job that may use a GPU on
+    /// a machine with one: what its service declares (`limits.vram_gb`), at most the first
+    /// GPU's, else the whole first GPU's; none for a token amount (under 0.1 GB).
+    pub fn of(limits: &Limits, gpu_service: bool, as_node: bool) -> Given {
+        let node = crate::machine::cpus().max(1);
+        let cpus = if as_node { node } else { (limits.cpu.ceil().max(1.0) as u32).min(node) };
+        let gpu_mem_gb = if limits.gpu_job() || gpu_service {
+            match (limits.vram_gb, crate::machine::first_gpu_gb()) {
+                (_, None) => None,
+                (Some(v), _) if v < 0.1 => None,
+                (Some(v), Some(whole)) => Some((v.min(whole) * 10.0).round() / 10.0),
+                (None, Some(whole)) => Some(whole),
+            }
+        } else {
+            None
+        };
+        Given { cpus, gpu_mem_gb }
+    }
+
+    /// job.json's `limits`: {"cpus", "gpu_mem_gb"} (the latter where known).
+    pub fn limits(&self) -> Value {
+        let mut l = serde_json::Map::new();
+        l.insert("cpus".into(), self.cpus.into());
+        if let Some(gb) = self.gpu_mem_gb {
+            l.insert("gpu_mem_gb".into(), gb.into());
+        }
+        Value::Object(l)
+    }
+}
+
+impl Launch {
+    /// Node 2.1.8: the variables the job gets beyond the contract's folders, in the order a
+    /// Windows command line too long for all of them drops them from the end (sys_windows.rs):
+    /// Python's UTF-8, then its cores, then its GPU memory. A job run as the node's own account
+    /// keeps what the node's environment sets already (never AMSYOS_*, which are the node's).
+    /// On Linux a job as `amsyos-job` gets the same from `amsyos-job launch` (job.rs).
+    pub fn told(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = UTF8_VARS.iter().map(|(k, v)| (*k, v.to_string())).collect();
+        if self.given.cpus > 0 {
+            out.extend(THREAD_VARS.iter().map(|k| (*k, self.given.cpus.to_string())));
+        }
+        if let Some(gb) = self.given.gpu_mem_gb {
+            out.push((GPU_VAR, format!("{gb}")));
+        }
+        if self.as_node {
+            out.retain(|(k, _)| k.starts_with("AMSYOS_") || std::env::var_os(k).is_none_or(|v| v.is_empty()));
+        }
+        out
+    }
 }
 
 /// A job's `limits` (sdk/NODE.md §2), bounded here whatever the kernel sent.
@@ -46,13 +132,15 @@ pub struct Limits {
     pub cpu: f64,
     pub ram_gb: f64,
     pub gpu: String,
+    /// Node 2.1.8: the GPU memory the service declares (its manifest's `resources.vram_gb`).
+    pub vram_gb: Option<f64>,
     pub max_runtime_s: u64,
     pub max_output_mb: u64,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { cpu: 1.0, ram_gb: 1.0, gpu: "none".into(), max_runtime_s: 3600, max_output_mb: 200 }
+        Limits { cpu: 1.0, ram_gb: 1.0, gpu: "none".into(), vram_gb: None, max_runtime_s: 3600, max_output_mb: 200 }
     }
 }
 
@@ -80,6 +168,10 @@ impl Limits {
             None if o.get("gpu").is_none_or(Value::is_null) => {}
             _ => problems.push("limits.gpu: none, optional or required".into()),
         }
+        // Only what the job is told (Given): one out of bounds is left out, never a refusal.
+        if let Some(Some(x)) = num("vram_gb") {
+            l.vram_gb = (x.is_finite() && (0.0..=4096.0).contains(&x)).then_some(x);
+        }
         match num("max_runtime_s") {
             Some(Some(x)) if (1.0..=7.0 * 86400.0).contains(&x) => l.max_runtime_s = x as u64,
             None => {}
@@ -103,6 +195,8 @@ impl Limits {
 pub struct JobDir {
     pub dir: PathBuf,
     pub real: PathBuf,
+    /// What `job.json` says, as `prepare` wrote it (`tell` adds `limits`).
+    told: Value,
 }
 
 /// Makes the job's folder and writes `job.json`: `service` says which service the job is for
@@ -116,15 +210,44 @@ pub fn prepare(
     inputs: &BTreeMap<String, String>,
 ) -> Result<JobDir, String> {
     let real = sys::prepare_job_dir(root, id)?;
-    let jd = JobDir { dir: root.join(id), real };
     let told = json!({
         "job": id, "service": {"id": service, "version": version}, "version": version,
         "params": params, "inputs": inputs,
     });
+    let jd = JobDir { dir: root.join(id), real, told };
     let path = jd.dir.join("job.json");
-    std::fs::write(&path, told.to_string()).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    std::fs::write(&path, jd.told.to_string()).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     sys::job_may_read(&path);
     Ok(jd)
+}
+
+/// Node 2.1.8: `job.json` again with what the job may use (`limits`, sdk/CONTRACT.md §3),
+/// just before the job starts. Written beside it as a new file, then renamed over it:
+/// whatever lies at `job.json` is replaced, never written through. Without it the job runs
+/// as before.
+pub fn tell(jd: &JobDir, given: &Given) {
+    if given.cpus == 0 {
+        return;
+    }
+    let mut told = jd.told.clone();
+    if let Some(o) = told.as_object_mut() {
+        o.insert("limits".into(), given.limits());
+    }
+    let (fresh, path) = (jd.dir.join(".job.json.new"), jd.dir.join("job.json"));
+    let _ = std::fs::remove_file(&fresh);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&fresh)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, told.to_string().as_bytes()))
+        .and_then(|_| std::fs::rename(&fresh, &path));
+    match written {
+        Ok(()) => sys::job_may_read(&path),
+        Err(e) => {
+            let _ = std::fs::remove_file(&fresh);
+            crate::warn!("job.json in {} was not told the job's limits: {e}", jd.dir.display());
+        }
+    }
 }
 
 /// Where an input `in/<file>` goes.
@@ -235,9 +358,11 @@ impl Tail {
         self.buf.drain(..over.min(self.buf.len()));
         self.buf.extend(data);
     }
+    /// As text: UTF-8, and on Windows a line that is no UTF-8 read in the console's code
+    /// page (node 2.1.8, `sys::decode_output`).
     pub fn text(&self) -> String {
         let (a, b) = self.buf.as_slices();
-        String::from_utf8_lossy(&[a, b].concat()).into_owned()
+        sys::decode_output(&[a, b].concat())
     }
 }
 
@@ -347,6 +472,8 @@ pub async fn execute(
     mut cancel: watch::Receiver<bool>,
     mut progress: impl FnMut(u8),
 ) -> Result<Ended, String> {
+    let given = Given::of(limits, svc.gpu, as_node);
+    tell(jd, &given);
     let launch = Launch {
         job_dir: jd.dir.clone(),
         service_dir: svc.dir.clone(),
@@ -358,6 +485,7 @@ pub async fn execute(
         node_dir: node_dir.to_path_buf(),
         as_node,
         serve_state: None,
+        given,
     };
     let started = Instant::now();
     let spawned = tokio::task::spawn_blocking(move || sys::spawn(&launch)).await.map_err(|e| e.to_string())??;

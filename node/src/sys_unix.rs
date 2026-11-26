@@ -178,6 +178,12 @@ pub fn prepare_job_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
     dir.canonicalize().map_err(|e| e.to_string())
 }
 
+/// What a job's processes wrote, as text (node 2.1.8; Windows reads a line that is no UTF-8
+/// in its console's code page): UTF-8, anything else replaced.
+pub fn decode_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// A file the node put in the job's folder (job.json, an input): the job may read it.
 pub fn job_may_read(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640));
@@ -359,6 +365,7 @@ fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
         .env("TMPDIR", format!("{job}/tmp"))
         .env("PATH", format!("{}:{path}", config::bin_dir().display()))
         .env("PYTHONPATH", crate::pymod::pythonpath(inherited.as_deref()))
+        .envs(l.told()) // 2.1.8: UTF-8, its cores and GPU memory (what the node's own sets stays)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
@@ -421,6 +428,14 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     cmd.args(["-n", "-u", JOB_USER, "--", &wrapper, "launch"])
         .args(["--job", &job, "--dir", &dir, "--bin", &bin, "--nice", nice])
         .args(["--mem", &mem_bytes, "--cpu-s", &cpu_s.to_string()]);
+    // 2.1.8: what the job is told it may use (`launch` sets UTF-8 by itself; an older copy of
+    // the program ignores both).
+    if l.given.cpus > 0 {
+        cmd.args(["--cpus", &l.given.cpus.to_string()]);
+    }
+    if let Some(gb) = l.given.gpu_mem_gb {
+        cmd.args(["--gpu-gb", &format!("{gb}")]);
+    }
     if let Some(state) = &l.serve_state {
         cmd.args(["--serve", &state.to_string_lossy()]);
     }

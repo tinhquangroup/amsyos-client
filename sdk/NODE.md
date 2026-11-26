@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.7)
+# AMSYOS Node, protocol 1 (node 2.1.8)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -10,7 +10,8 @@ Node 2.1.4 plans with the memory its cgroup allows and says when a job ran out o
 Node 2.1.5 removes a deployment from afar (`undeploy`, §5), frees the builds no deployment uses
 and says what each deployment holds of the disk (`disk`, §2 and §4). Node 2.1.6 sends the log
 it kept of a job when the kernel asks (`log`, §5); 2.1.7 keeps job logs 7 days (§5 `log`).
-A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
+Node 2.1.8 rides out a restart of AMSYOS: its jobs go on and are recorded as they ended (§2
+"When the connection drops", §3). A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
 
 ## 1. Joining
@@ -67,7 +68,8 @@ jitter).
    - `services`: the service ids switched on at the machine (§4). The kernel places a job of
      a service only on a node that lists it.
    - `slots`: how many jobs it runs at once (a workstation 1, a server about half its CPUs;
-     the person may set it).
+     the person may set it). AMSYOS believes 1 to 16 (2 when a node says none) and sends a node
+     no more jobs than that at once; those jobs take none of the organisation's other slots.
    - `idle_s`: seconds since the person last used keyboard or mouse; `null` on a server or
      where it cannot be read. A workstation takes a job that needs or may use a GPU only
      when `idle_s` ≥ 300.
@@ -134,6 +136,25 @@ tree and answers `cancelled` (or nothing, if it never had the job).
 `took_s` is the node's own measure and prices nothing: the kernel trusts no number a node
 sends. Sizes and counts are bounded on the VPS.
 
+### When the connection drops (a restart of AMSYOS)
+
+AMSYOS restarts its Gateway and its dispatcher together (some 10-20 s): the connection drops
+and the node dials again (above).
+
+- The node keeps its jobs running while it is away, and keeps what it would have sent; after
+  the next `welcome` it sends that, in order. Its `hello` names the jobs it still runs
+  (`running`): the Gateway lets each go on when it is still placed on that node, for the
+  node's own organisation, and not ended or cancelled; it answers `cancel` for any other.
+- 2.1.8: after each `welcome` the node also says again the end (`succeeded`, `failed`,
+  `cancelled`) of each job that ended in the last 10 minutes, at most 64: one sent as the
+  Gateway went may be lost. The Gateway takes a job's end once and leaves the rest unanswered.
+- The kernel takes up the jobs the stopped dispatcher left on nodes and waits for their ends
+  (drivers/node.py `reattach`). A node away 10 minutes while it runs a job has the job failed
+  (`PROVIDER_ERROR`, not charged). A node that dials in again without naming a job it had
+  taken (it was restarted), and says no end of it within 60 s, has it failed the same way.
+- A node before 2.1.8 does the first point too, but a file it could not put while the
+  Gateway was away (§3) fails its job.
+
 ## 3. Files (2.0: through the Asset Store)
 
 - **In:** `GET` each input's `url` (a short-lived signed link, about 15 minutes) and write
@@ -142,6 +163,10 @@ sends. Sizes and counts are bounded on the VPS.
   {put}<name>.<ext>` with the file as the body (`Content-Length` set). `200 {"ok": true}`;
   each name once; at most `max_output_mb` each. Then the `succeeded` message names them. A
   file whose name is no output is left out (and said in `said`).
+- 2.1.8: a `GET` or `PUT` that finds the Gateway away (no connection, a broken body, or
+  `502`/`503`/`504` from the proxy in front of it) is tried again after 2, 4, 8, 16, then
+  every 30 s, for up to 10 minutes; a `PUT` tried again that is answered `409` was put by an
+  earlier try. The job stays in `running` meanwhile.
 
 The links are signed by the kernel for this job and this node only, and expire.
 
@@ -155,11 +180,23 @@ The links are signed by the kernel for this job and this node only, and expire.
   and file links only: never code, never a command to install anything.
 - **A job** is contract 1 (`sdk/CONTRACT.md` §3): its folder holds `job.json`
   (`{"job", "service": {"id", "version"}, "version", "params", "inputs": {"<name>":
-  "in/<file>"}}`; a node before 2026-11-23 wrote `service` as the id alone), `in/`,
+  "in/<file>"}, "limits": {"cpus", "gpu_mem_gb"}}`; a node before 2026-11-23 wrote `service`
+  as the id alone, one before 2.1.8 no `limits`), `in/`,
   `out/`, optional `progress` and `error.json`; `$AMSYOS_JOB` names the folder; the command
   runs in the service's folder. The node program is also `amsyos-job`
   (`amsyos-node job <params|param|input|service|service-version|output|progress|fail|next|done> …`,
   and a copy named `amsyos-job` on the job's `PATH`).
+- **What a job is told (2.1.8).** Every job (a command, a server kept warm, `node.exec`) gets
+  `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, and `AMSYOS_CPUS` with `OMP_NUM_THREADS`,
+  `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `NUMEXPR_NUM_THREADS` and `NUMEXPR_MAX_THREADS`:
+  the fewest of `limits.cpu` (rounded up) and the node's CPUs (the node's own account: the
+  node's CPUs). A job that may use a GPU also gets `AMSYOS_GPU_MEM_GB`: `limits.vram_gb`, at
+  most the first GPU's, else the whole first GPU's. The same go into `job.json` `limits`
+  (`sdk/CONTRACT.md` §3). On Linux `amsyos-job launch` sets them for a job as `amsyos-job`
+  (`--cpus`, `--gpu-gb`; an older copy of the program ignores both: run `setup` again). On
+  Windows cmd sets them with the contract's variables; a command line over Windows' 1,024
+  characters keeps the UTF-8 ones only, then none. On Windows the node reads each line of a
+  job's output as UTF-8, or in the machine's OEM code page when it is not UTF-8.
 - **The Python job module (2.1.2).** `from amsyos import job, serve` (`sdk/amsyos`, built into
   the program; `job.params`, `job.input(name)`, `job.service` and `job.service_version`, by
   which services that share one folder or image tell their jobs apart, and `job.folder`, the

@@ -293,8 +293,9 @@ mod unix {
     }
 
     /// `launch --job <folder> --dir <service folder> --bin <dir> --nice <n> --mem <bytes>
-    /// --cpu-s <seconds> [--serve <state file>] -- <command line>` (`--as` is the old name of
-    /// `--mem`; `--serve`: a server kept warm, node 2.1.2)
+    /// --cpu-s <seconds> [--cpus <n>] [--gpu-gb <x>] [--serve <state file>] -- <command line>`
+    /// (`--as` is the old name of `--mem`; `--serve`: a server kept warm, node 2.1.2; `--cpus`
+    /// and `--gpu-gb`: what the job is told it may use, node 2.1.8)
     pub fn launch(args: &[String]) -> Result<i32, String> {
         let split = args.iter().position(|a| a == "--").ok_or("launch: -- <command> is missing")?;
         let (opts, command) = (&args[..split], args[split + 1..].join(" "));
@@ -348,7 +349,16 @@ mod unix {
             .env("TMPDIR", format!("{job}/tmp"))
             .env("LANG", "C.UTF-8")
             .env("USER", "amsyos-job")
+            .envs(crate::exec::UTF8_VARS) // node 2.1.8: Python's UTF-8 whatever the locale
             .process_group(0);
+        // Node 2.1.8: what the job may use of the machine (sdk/CONTRACT.md §3), as the node
+        // computed it; bounded here, an unreadable value left out.
+        if let Some(cpus) = value(opts, "--cpus").and_then(|v| v.parse::<u32>().ok()).filter(|n| (1..=1024).contains(n)) {
+            cmd.envs(crate::exec::THREAD_VARS.map(|k| (k, cpus.to_string())));
+        }
+        if let Some(gb) = value(opts, "--gpu-gb").and_then(|v| v.parse::<f64>().ok()).filter(|x| x.is_finite() && *x > 0.0 && *x <= 4096.0) {
+            cmd.env(crate::exec::GPU_VAR, format!("{gb}"));
+        }
         match value(opts, "--serve") {
             // Node 2.1.2: a server kept warm (serve.rs). `job` is its own folder, not a job's;
             // its stdin is the node's pipe of jobs, which `amsyos-job next` and `done` reach

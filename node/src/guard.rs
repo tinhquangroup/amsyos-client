@@ -130,6 +130,7 @@ pub fn ask(paths: &[PathBuf], ask: Ask, node_dir: &Path, jobs_root: &Path) -> Re
             node_dir: node_dir.to_path_buf(),
             as_node: false,
             serve_state: None,
+            given: Default::default(),
         };
         let (code, out, err) = run_once(&launch, 90)?;
         if !out.lines().any(|l| l.trim() == DONE) {

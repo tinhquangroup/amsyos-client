@@ -45,6 +45,25 @@ pub fn cpus() -> u32 {
     std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1)
 }
 
+/// Node 2.1.8: the GPUs `probe` found last, so a job is told its GPU memory without asking
+/// nvidia-smi at each job.
+static GPUS: std::sync::Mutex<Option<Vec<Gpu>>> = std::sync::Mutex::new(None);
+
+/// The memory of the machine's first GPU, in GB (what a job may count on when its service
+/// declares none, as on a rented node); None on a machine without one. Asked once (bounded
+/// to 8 s) when no `probe` ran yet.
+pub fn first_gpu_gb() -> Option<f64> {
+    let known = GPUS.lock().ok().and_then(|g| g.clone());
+    let gpus = known.unwrap_or_else(|| {
+        let found = probe_gpus();
+        if let Ok(mut g) = GPUS.lock() {
+            *g = Some(found.clone());
+        }
+        found
+    });
+    gpus.first().map(|g| g.vram_gb).filter(|gb| gb.is_finite() && *gb > 0.0)
+}
+
 /// The software the node knows how to find.
 const NAMES: &[&str] = &["blender", "ffmpeg", "ollama", "python", "powershell", "pwsh", "node", "dotnet"];
 
@@ -59,6 +78,10 @@ pub fn probe(jobs_root: &Path) -> (Machine, Vec<Found>) {
     for f in &found {
         software.entry(f.name.to_string()).or_insert_with(|| f.version.clone());
     }
+    let gpus = gpus.join().unwrap_or_default();
+    if let Ok(mut g) = GPUS.lock() {
+        *g = Some(gpus.clone());
+    }
     let machine = Machine {
         os: if cfg!(windows) { "windows" } else { "linux" }.into(),
         arch: std::env::consts::ARCH.into(),
@@ -67,7 +90,7 @@ pub fn probe(jobs_root: &Path) -> (Machine, Vec<Found>) {
         cpus: cpus(),
         ram_gb: round1(crate::mem::total_gb()), // 2.1.4: its cgroup's limit when lower
         disk_free_gb: disk_free_gb(jobs_root),
-        gpus: gpus.join().unwrap_or_default(),
+        gpus,
         software,
         elevated: sys::is_elevated(),
     };

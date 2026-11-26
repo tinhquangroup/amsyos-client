@@ -221,11 +221,12 @@ fn fingerprint(svc: &Service) -> String {
 pub fn key(service: &str, version: &str, as_node: bool, kernel_key: Option<&str>, svc: &Service, limits: &Limits) -> Option<String> {
     let kernel_key = kernel_key?;
     let said = format!(
-        "{service}\n{version}\n{}\n{kernel_key}\n{}\n{}\n{}",
+        "{service}\n{version}\n{}\n{kernel_key}\n{}\n{}\n{}\n{:?}",
         if as_node { "node" } else { sys::JOB_USER },
         fingerprint(svc),
         limits.cpu,
-        limits.ram_gb
+        limits.ram_gb,
+        exec::Given::of(limits, svc.gpu, as_node), // 2.1.8: what its jobs are told
     );
     Some(util::hex(&Sha256::digest(said.as_bytes())))
 }
@@ -255,6 +256,7 @@ impl Warm {
             node_dir: node_dir.to_path_buf(),
             as_node,
             serve_state: Some(folder.join("serve.json")),
+            given: exec::Given::of(limits, svc.gpu, as_node), // 2.1.8: the same for each of its jobs
         };
         let spawned = match sys::spawn(&launch) {
             Ok(s) => s,
@@ -512,6 +514,7 @@ pub async fn execute(
     mut cancel: watch::Receiver<bool>,
     mut progress: impl FnMut(u8),
 ) -> Result<(Ended, &'static str), String> {
+    exec::tell(jd, &exec::Given::of(limits, svc.gpu, as_node)); // 2.1.8: job.json's `limits`
     let started = Instant::now();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(limits.max_runtime_s);
     let mut fresh = false;

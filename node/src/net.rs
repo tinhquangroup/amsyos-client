@@ -31,6 +31,13 @@ const HINT_MAX: usize = 500;
 /// soon after a deploy or an undeploy, but never twice within MEASURE_GAP.
 const MEASURE_S: u64 = 600;
 const MEASURE_GAP: Duration = Duration::from_secs(60);
+/// Node 2.1.8: a restart of AMSYOS (its Gateway away some 10-20 s; a customer, 2026-11-26)
+/// leaves the jobs running. A file's GET or PUT waits this long for a Gateway that is away
+/// (no connection, or 502/503/504 from the proxy in front of it), trying again; the end of
+/// each job of this long ago is said again after each welcome (one sent as the Gateway went
+/// may be lost; the Gateway takes a job's end once).
+const AWAY_FOR: Duration = Duration::from_secs(600);
+const ENDS_KEPT: usize = 64;
 
 pub fn tls() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
@@ -208,6 +215,8 @@ struct Ctx {
     using: Mutex<HashMap<String, Vec<String>>>,
     /// Node 2.1.5: measure the disk soon (a deploy or an undeploy changed it).
     disk_now: Notify,
+    /// Node 2.1.8: the ends of the jobs of the last `AWAY_FOR`, said again after each welcome.
+    ends: Mutex<Vec<(Instant, String)>>,
 }
 
 impl Ctx {
@@ -223,6 +232,23 @@ impl Ctx {
             lines.extend(u.values().flatten().cloned());
         }
         lines
+    }
+
+    /// Node 2.1.8: a job's end, sent now and kept to be said again after a welcome.
+    fn send_end(&self, v: Value) {
+        let text = v.to_string();
+        if let Ok(mut ends) = self.ends.lock() {
+            ends.retain(|(at, _)| at.elapsed() < AWAY_FOR);
+            if ends.len() >= ENDS_KEPT {
+                ends.remove(0);
+            }
+            ends.push((Instant::now(), text.clone()));
+        }
+        let _ = self.out.send(text);
+    }
+
+    fn ends_now(&self) -> Vec<String> {
+        self.ends.lock().map(|e| e.iter().filter(|(at, _)| at.elapsed() < AWAY_FOR).map(|(_, m)| m.clone()).collect()).unwrap_or_default()
     }
 
     fn running_ids(&self) -> Vec<String> {
@@ -384,6 +410,7 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         builds: Arc::new(RwLock::new(())),
         using: Mutex::new(HashMap::new()),
         disk_now: Notify::new(),
+        ends: Mutex::new(Vec::new()),
     });
     info!(
         "AMSYOS Node {} — node {} of {}, a {}, {} slot(s), jobs in {}, Gateway {}",
@@ -554,6 +581,12 @@ async fn session(
     if let Some(m) = pending.take() {
         if let Err(e) = ws.send(Message::text(m.clone())).await {
             *pending = Some(m);
+            return End::Lost(format!("cannot send: {e}"), true);
+        }
+    }
+    // Node 2.1.8: the jobs that ended lately, said again (the Gateway takes an end once).
+    for m in ctx.ends_now() {
+        if let Err(e) = ws.send(Message::text(m)).await {
             return End::Lost(format!("cannot send: {e}"), true);
         }
     }
@@ -844,7 +877,7 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
         let msg = do_job(&ctx, &job, &svc, rx, started).await;
         drop(held);
         info!("job {id}: {}", msg.get("status").and_then(Value::as_str).unwrap_or("?"));
-        ctx.send(msg);
+        ctx.send_end(msg);
         if let Ok(mut r) = ctx.running.lock() {
             r.remove(&id);
         }
@@ -1577,51 +1610,68 @@ async fn fetch_package(http: &reqwest::Client, url: &Url, path: &Path, most: u64
     Ok((total, util::hex(&hash.finalize())))
 }
 
-/// GET an input's link into the job's folder. A failed connection is tried once more; an
-/// answer that is not 200 is not.
-async fn fetch(http: &reqwest::Client, url: &Url, path: &Path) -> Result<u64, String> {
-    let mut last = String::new();
-    for attempt in 0..2 {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-        let mut resp = match http.get(url.clone()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                last = e.to_string();
-                continue;
-            }
-        };
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("HTTP {status}: {}", util::cut(&text, 200)));
-        }
-        let mut f = tokio::fs::File::create(path).await.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        let mut total = 0u64;
-        let copied: Result<(), String> = async {
-            while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
-                total += chunk.len() as u64;
-                f.write_all(&chunk).await.map_err(|e| e.to_string())?;
-            }
-            f.flush().await.map_err(|e| e.to_string())
-        }
-        .await;
-        match copied {
-            Ok(()) => return Ok(total),
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
+/// Node 2.1.8: a Gateway that is away (AMSYOS restarting) answers so through its proxy.
+fn away_status(status: u16) -> bool {
+    matches!(status, 502..=504)
 }
 
+/// The pause before trying a file again while the Gateway is away (2, 4 … 30 s), or None
+/// once it has been away `AWAY_FOR`.
+fn again_after(since: Instant, tries: u32) -> Option<Duration> {
+    (since.elapsed() < AWAY_FOR).then(|| Duration::from_secs((2u64 << tries.min(4)).min(30)))
+}
+
+/// GET an input's link into the job's folder. A failed connection, a broken body or a
+/// Gateway away (2.1.8) is tried again for up to `AWAY_FOR`; any other answer that is not
+/// 200 is not.
+async fn fetch(http: &reqwest::Client, url: &Url, path: &Path) -> Result<u64, String> {
+    let (since, mut tries) = (Instant::now(), 0u32);
+    loop {
+        let why = match http.get(url.clone()).send().await {
+            Err(e) => e.to_string(),
+            Ok(r) if away_status(r.status().as_u16()) => format!("HTTP {}", r.status().as_u16()),
+            Ok(r) if !r.status().is_success() => {
+                let status = r.status().as_u16();
+                let text = r.text().await.unwrap_or_default();
+                return Err(format!("HTTP {status}: {}", util::cut(&text, 200)));
+            }
+            Ok(mut resp) => {
+                let mut f = tokio::fs::File::create(path).await.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                let mut total = 0u64;
+                let read = loop {
+                    match resp.chunk().await {
+                        Ok(Some(chunk)) => {
+                            total += chunk.len() as u64;
+                            f.write_all(&chunk).await.map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+                        }
+                        Ok(None) => break None,
+                        Err(e) => break Some(e.to_string()),
+                    }
+                };
+                match read {
+                    None => {
+                        f.flush().await.map_err(|e| e.to_string())?;
+                        return Ok(total);
+                    }
+                    Some(e) => e,
+                }
+            }
+        };
+        let Some(pause) = again_after(since, tries) else { return Err(why) };
+        if tries == 0 {
+            warn!("an input: the Gateway did not answer ({}); trying again for up to {} minutes", util::cut(&why, 200), AWAY_FOR.as_secs() / 60);
+        }
+        tries += 1;
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// PUT an output to its link. A failed connection or a Gateway away (2.1.8: AMSYOS
+/// restarting) is tried again for up to `AWAY_FOR`; a 409 then means an earlier try put it.
 async fn put_output(http: &reqwest::Client, put: &str, o: &exec::OutFile) -> Result<(), String> {
     let url = format!("{put}{}", o.file_name);
-    let mut last = String::new();
-    for attempt in 0..2 {
-        if attempt > 0 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
+    let (since, mut tries) = (Instant::now(), 0u32);
+    loop {
         let mut f = o.file.try_clone().map_err(|e| e.to_string())?;
         f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let body = reqwest::Body::from(tokio::fs::File::from_std(f));
@@ -1632,15 +1682,22 @@ async fn put_output(http: &reqwest::Client, put: &str, o: &exec::OutFile) -> Res
             .body(body)
             .send()
             .await;
-        match sent {
+        let why = match sent {
             Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) if tries > 0 && r.status().as_u16() == 409 => return Ok(()),
+            Ok(r) if away_status(r.status().as_u16()) => format!("HTTP {}", r.status().as_u16()),
             Ok(r) => {
                 let status = r.status().as_u16();
                 let text = r.text().await.unwrap_or_default();
                 return Err(format!("HTTP {status}: {}", util::cut(&text, 200)));
             }
-            Err(e) => last = e.to_string(),
+            Err(e) => e.to_string(),
+        };
+        let Some(pause) = again_after(since, tries) else { return Err(why) };
+        if tries == 0 {
+            warn!("output {}: the Gateway did not answer ({}); trying again for up to {} minutes", o.name, util::cut(&why, 200), AWAY_FOR.as_secs() / 60);
         }
+        tries += 1;
+        tokio::time::sleep(pause).await;
     }
-    Err(last)
 }

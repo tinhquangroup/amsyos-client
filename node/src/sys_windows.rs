@@ -382,6 +382,43 @@ pub fn prepare_job_dir(root: &Path, id: &str) -> Result<PathBuf, String> {
 
 pub fn job_may_read(_path: &Path) {}
 
+/// What a job's processes wrote, as text (node 2.1.8): a line that is UTF-8 as it is (Python
+/// with PYTHONUTF8, Node.js, most programs of today), any other read in the machine's OEM
+/// code page, which cmd, PowerShell and .NET write to a pipe, never as replacement marks (a
+/// customer, 2026-11-26: Vietnamese text). The kept end of a log (exec.rs `Tail`) may begin
+/// inside a UTF-8 character: those bytes are dropped.
+pub fn decode_output(bytes: &[u8]) -> String {
+    use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_OEMCP};
+    let mut out = String::with_capacity(bytes.len());
+    for (i, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        let line = if i == 0 { past_cut(line) } else { line };
+        if let Ok(text) = std::str::from_utf8(line) {
+            out.push_str(text);
+            continue;
+        }
+        let len = line.len().min(i32::MAX as usize) as i32;
+        let n = unsafe { MultiByteToWideChar(CP_OEMCP, 0, line.as_ptr(), len, null_mut(), 0) };
+        if n <= 0 {
+            out.push_str(&String::from_utf8_lossy(line));
+            continue;
+        }
+        let mut units = vec![0u16; n as usize];
+        let n = unsafe { MultiByteToWideChar(CP_OEMCP, 0, line.as_ptr(), len, units.as_mut_ptr(), n) };
+        out.push_str(&String::from_utf16_lossy(&units[..n.max(0) as usize]));
+    }
+    out
+}
+
+/// A line without the 1 to 3 bytes of a UTF-8 character cut at its start, when the rest is
+/// UTF-8.
+fn past_cut(line: &[u8]) -> &[u8] {
+    if std::str::from_utf8(line).is_ok() {
+        return line;
+    }
+    let cut = line.iter().take(3).take_while(|b| (0x80..=0xBF).contains(*b)).count();
+    if cut > 0 && std::str::from_utf8(&line[cut..]).is_ok() { &line[cut..] } else { line }
+}
+
 pub fn remove_job_dir(dir: &Path) {
     if let Err(e) = std::fs::remove_dir_all(dir) {
         if dir.exists() {
@@ -580,8 +617,9 @@ fn env_block(l: &Launch) -> Vec<u16> {
 /// on its PYTHONPATH (node 2.1.2; after the node's own PYTHONPATH for a job run as the node's
 /// account, which inherits the node's environment). A server kept warm is told where
 /// `amsyos-job next` keeps the job now instead of a job's folder. A value cmd would read as
-/// more than text is refused.
-fn job_vars(l: &Launch) -> Result<String, String> {
+/// more than text is refused. Node 2.1.8: then `told` (`Launch::told`: Python's UTF-8, the
+/// job's cores and GPU memory), before the service's command, which may set them otherwise.
+fn job_vars(l: &Launch, told: &[(&'static str, String)]) -> Result<String, String> {
     let job = l.job_dir.display().to_string();
     let clean = |v: &str| !v.chars().any(|c| matches!(c, '"' | '%' | '&' | '|' | '<' | '>' | '^' | '\n' | '\r'));
     let inherited = if l.as_node { env("PYTHONPATH").filter(|p| clean(p)) } else { None };
@@ -597,7 +635,7 @@ fn job_vars(l: &Launch) -> Result<String, String> {
         ("PYTHONPATH", crate::pymod::pythonpath(inherited.as_deref())),
     ];
     let mut out = String::new();
-    for (k, v) in vars {
+    for (k, v) in vars.into_iter().chain(told.iter().cloned()) {
         let text = v.replace("%PATH%", "");
         if text.chars().any(|c| matches!(c, '"' | '%' | '&' | '|' | '<' | '>' | '^' | '\n' | '\r')) {
             return Err(format!("the path {text} has a character cmd would not take as text"));
@@ -641,7 +679,7 @@ fn spawn_as_node(l: &Launch) -> Result<Spawned, String> {
         lpSecurityDescriptor: null_mut(),
         bInheritHandle: 1,
     };
-    let prefix = job_vars(l)?;
+    let prefix = job_vars(l, &l.told())?;
     let (out_r, out_w) = pipe(&sa)?;
     let (err_r, err_w) = pipe(&sa)?;
     let (nul, in_w) = stdin_for(l, &sa)?;
@@ -753,14 +791,35 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     // The job's environment is its own account's (lpEnvironment NULL: the secondary logon
     // service builds it from the job account's profile; an explicit block was refused with
     // error 87 on Windows 10, tried on PC2 2026-11-18). Nothing of the node's is in it.
-    // What contract 1 adds is set by cmd itself before the command runs.
-    let prefix = match job_vars(l) {
-        Ok(p) => p,
-        Err(e) => {
-            password.iter_mut().for_each(|c| *c = 0);
-            return Err(e);
+    // What contract 1 adds is set by cmd itself before the command runs. Node 2.1.8: a
+    // command line too long (below) for all the job is told (`Launch::told`) keeps Python's
+    // UTF-8 only, then none of it, so that a command that started before still starts.
+    let cmd_exe = system_root().join(r"System32\cmd.exe");
+    let app = wide(&cmd_exe);
+    let told = l.told();
+    let mut line: Vec<u16> = Vec::new();
+    for keep in [told.len(), told.len().min(crate::exec::UTF8_VARS.len()), 0] {
+        let prefix = match job_vars(l, &told[..keep]) {
+            Ok(p) => p,
+            Err(e) => {
+                password.iter_mut().for_each(|c| *c = 0);
+                return Err(e);
+            }
+        };
+        line = OsStr::new(&format!("\"{}\" /d /s /c \"{prefix}{}\"", cmd_exe.display(), l.command))
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        if line.len() <= 1024 {
+            if keep < told.len() {
+                warn!(
+                    "the job's command line is long: it is told {keep} of its {} variables (UTF-8, cores, GPU memory); a script file keeps the command short",
+                    told.len()
+                );
+            }
+            break;
         }
-    };
+    }
     let (out_r, out_w) = pipe(&sa)?;
     let (err_r, err_w) = pipe(&sa)?;
     let (nul, in_w) = stdin_for(l, &sa)?;
@@ -772,12 +831,6 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     si.hStdOutput = out_w;
     si.hStdError = err_w;
 
-    let cmd_exe = system_root().join(r"System32\cmd.exe");
-    let app = wide(&cmd_exe);
-    let line: Vec<u16> = OsStr::new(&format!("\"{}\" /d /s /c \"{prefix}{}\"", cmd_exe.display(), l.command))
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
     // CreateProcessWithLogonW takes a command line of at most 1024 characters (and says
     // only "the parameter is incorrect" when it is longer).
     if line.len() > 1024 {
@@ -805,7 +858,6 @@ pub fn spawn(l: &Launch) -> Result<Spawned, String> {
     let domain = wide(".");
     let priority = if l.server { NORMAL_PRIORITY_CLASS } else { BELOW_NORMAL_PRIORITY_CLASS };
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    let mut line = line;
     // The secondary logon service takes few creation flags: no priority class here (the
     // Job Object and SetPriorityClass set it below).
     let ok = unsafe {
@@ -1079,7 +1131,7 @@ pub fn diag(service_dir: Option<PathBuf>) -> Result<i32, String> {
     let fake = Launch {
         job_dir: dir.clone(), service_dir: dir.clone(), command: String::new(), cpu: 1.0,
         ram_gb: 1.0, max_runtime_s: 10, server: true, node_dir: config::node_dir(),
-        as_node: false, serve_state: None,
+        as_node: false, serve_state: None, given: Default::default(),
     };
     let block = env_block(&fake);
     let desk = wide(r"winsta0\default");

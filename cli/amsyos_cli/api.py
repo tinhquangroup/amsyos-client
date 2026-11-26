@@ -42,6 +42,33 @@ RATE_WAIT_MOST_S = 15
 RATE_WAIT_ALL_S = 60
 RATE_TRIES = 4
 _ASK_AGAIN = re.compile(r"Ask again in (\d+(?:\.\d+)?) s")
+# A restart of AMSYOS (its Gateway away some 10-20 s; a customer, 2026-11-26: a script's
+# amsyos.status got an MCP error and the script stopped) is waited out: a call that cannot
+# run twice is asked again while AMSYOS cannot be reached, answers 502/503/504 or ends the
+# call's MCP session, for about a minute in all. `run` only with its idempotency key.
+AWAY_WAIT_ALL_S = 60
+AWAY_PAUSE_MOST_S = 15
+AWAY_STATUSES = frozenset({502, 503, 504})
+ONCE_ONLY = frozenset(
+    {"amsyos.discover", "amsyos.describe", "amsyos.status", "amsyos.result", "amsyos.cancel"}
+)
+_SESSION_ENDED = re.compile(r"session (terminated|not found)|shutting down", re.IGNORECASE)
+_AWAY_ERRORS = (
+    httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+    httpx.TimeoutException,
+)  # fmt: skip
+
+
+class _NotAnsweredError(CliError):
+    """AMSYOS did not answer this call (restarting, or the network): it may be asked again."""
+
+    def __init__(self, code: str, hint: str, reason: str) -> None:
+        super().__init__(code, hint)
+        self.reason = reason
+
+
+class _AwayError(Exception):
+    """A sign that AMSYOS is away, raised and caught inside `Api._call`."""
 
 
 def held_up(status: dict[str, Any]) -> bool:
@@ -91,6 +118,7 @@ class Api:
         # outside a repository. False once the Gateway said it takes no `source` yet.
         self._source: dict[str, Any] | bool | None = True
         self.missing: set[str] = set()  # services this Gateway does not have yet
+        self._told_away = False  # "waiting for AMSYOS to come back" was said
 
     async def __aenter__(self) -> Api:
         stack = AsyncExitStack()
@@ -125,6 +153,17 @@ class Api:
     async def _seen(self, response: httpx.Response) -> None:
         self._status = response.status_code
 
+    def _away(self, exc: BaseException) -> _NotAnsweredError:
+        """AMSYOS did not answer: unreachable, its proxy's 502/503/504, or the call's MCP
+        session ended with it in flight; `call` may ask again."""
+        reason = short(str(exc) if isinstance(exc, _AwayError) else _first_cause(exc), 160)
+        return _NotAnsweredError(
+            "UNREACHABLE",
+            f"cannot reach AMSYOS at {self.creds.gateway} ({reason}); it may be restarting: "
+            "try again in a minute, else check the network or AMSYOS_GATEWAY",
+            reason,
+        )
+
     def _unreachable(self, exc: BaseException) -> CliError:
         if isinstance(exc, CliError):
             return exc
@@ -148,12 +187,31 @@ class Api:
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """One of the six tools; the answer's JSON, or a `CliError` with its code and hint.
-        A refusal for the rate with a short wait is waited out and asked again (bounded)."""
+        A refusal for the rate with a short wait is waited out and asked again (bounded), and
+        so is AMSYOS away, for a call that cannot run twice (`AWAY_WAIT_ALL_S`)."""
         waited = 0.0
         tries = 0
+        away_s = 0.0
+        away_tries = 0
+        keyed = tool == "amsyos.run" and bool(arguments.get("idempotency_key"))
+        once = tool in ONCE_ONLY or keyed
         while True:
             try:
                 return await self._call(tool, arguments)
+            except _NotAnsweredError as exc:
+                if not once or away_s >= AWAY_WAIT_ALL_S:
+                    raise
+                pause = min(AWAY_PAUSE_MOST_S, 2.0**away_tries, AWAY_WAIT_ALL_S - away_s)
+                away_tries += 1
+                if not self._told_away:
+                    self._told_away = True
+                    self.out.note(
+                        f"AMSYOS does not answer ({exc.reason}): it may be restarting; "
+                        f"waiting up to {AWAY_WAIT_ALL_S} s for it to come back"
+                    )
+                await asyncio.sleep(pause)
+                away_s += pause
+                continue
             except CliError as exc:
                 wait = _rate_wait(exc)
                 tries += 1
@@ -190,9 +248,13 @@ class Api:
             response = await self._client.post(self.creds.mcp_url, json=body, headers=headers)
             if response.status_code in {401, 403}:
                 raise RuntimeError(f"HTTP {response.status_code}")
+            if response.status_code in AWAY_STATUSES:
+                raise _AwayError(f"HTTP {response.status_code}")
             message = _message(response, self._ids)
         except CliError:
             raise
+        except (_AwayError, *_AWAY_ERRORS) as exc:
+            raise self._away(exc) from None
         except Exception as exc:
             raise self._unreachable(exc) from None
         if "error" in message:
@@ -204,6 +266,9 @@ class Api:
                 hint = str(data.get("hint") or "")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
                 raise CliError("RATE_LIMITED", hint, {"retry_after_s": after})
             what = short(str(said.get("message") if isinstance(said, dict) else said), 300)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            if _SESSION_ENDED.search(what):
+                # The Gateway stopped with the call in flight (a restart).
+                raise self._away(_AwayError(what))
             raise CliError("PROTOCOL", f"AMSYOS refused the call ({what}); amsyos is up to date?")
         result: Any = message.get("result") or {}
         blocks: Any = result.get("content") if isinstance(result, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -332,7 +397,7 @@ def _message(response: httpx.Response, wanted: int) -> dict[str, Any]:
                 said: Any = json.loads(data)
                 if isinstance(said, dict) and said.get("id") == wanted:  # pyright: ignore[reportUnknownMemberType]
                     return said  # pyright: ignore[reportUnknownVariableType]
-        raise RuntimeError("no answer in the event stream")
+        raise _AwayError("no answer in the event stream")  # the stream ended: a restart
     try:
         told: Any = response.json()
     except ValueError:

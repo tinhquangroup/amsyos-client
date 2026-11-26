@@ -2113,7 +2113,7 @@ def parser() -> Parser:
     p.add_argument(
         "--limit", type=limit_of, metavar="TIME",
         help="end the job if it runs longer (90s, 10m, 2h): a job of your code on your "
-        "rented node may otherwise run as long as the node is rented",
+        "rented node may otherwise run as long as the node is rented; on your own node up to 24h",
     )  # fmt: skip
 
     p = add(
@@ -2345,17 +2345,47 @@ def parser() -> Parser:
             found["list"] = verbs.add_parser(
                 "list", parents=[common], help="every node: id, type (rented, own), state"
             )
+            sx = found["exec"] = verbs.add_parser(
+                "exec", parents=[common],
+                help="run a command line or a script on an own node (node.exec: the node at "
+                "full, you an admin), wait, print what it printed, fetch the files it wrote",
+            )  # fmt: skip
+            sx.add_argument("node", help="the own node: its id n_… or its name (node list)")
+            sx.add_argument(
+                "command", nargs="?",
+                help="the command line (cmd on Windows, sh on Linux), run in the job's folder; "
+                "with --script, the script's arguments",
+            )  # fmt: skip
+            sx.add_argument(
+                "--script", metavar="FILE",
+                help="a script to send and run: .ps1 (PowerShell, -ExecutionPolicy Bypass), "
+                ".cmd or .bat on Windows; .sh (or its #! line) on Linux; deleted after",
+            )  # fmt: skip
+            sx.add_argument(
+                "--timeout", type=int, metavar="S",
+                help="stop it, with all it started, after S seconds (default 300, at most 86400)",
+            )  # fmt: skip
+            sx.add_argument(
+                "--get", action="append", metavar="out/a.csv,...",
+                help="files the command writes as out/<name>.<ext> in its folder, fetched into "
+                "--dest (8 at most)",
+            )  # fmt: skip
+            sx.add_argument(
+                "--dest", default=".", metavar="DIR", help="where --get's files go (default .)"
+            )
         return found
 
     p = add(
-        "node", cmd_node, "your nodes: rent one, show, close, extend, clean, list",
+        "node", cmd_node, "your nodes: rent one, show, close, extend, clean, list, exec",
         "the machines where your organisation's own code runs, for it alone (spec v3 §17): a "
         "rented node, AMSYOS rents by the hour from your credit (GPU, or none for less; images "
         "are built on it; one at a time), and own nodes, computers of yours running AMSYOS "
         "Node. Rent one for some hours, show one, give it back, add hours, free its disk, "
-        "list them all; one line each",
+        "list them all; run a command or a script on an own node; one line each",
     )  # fmt: skip
-    top.commands.update({f"node {k}": v for k, v in rented(p, "node_cmd", "rent", "|list").items()})
+    top.commands.update(
+        {f"node {k}": v for k, v in rented(p, "node_cmd", "rent", "|list|exec").items()}
+    )
     # `amsyos space …`, the old name (open is rent): still taken, listed nowhere.
     p = sub.add_parser(
         "space", parents=[common], description="the old name of amsyos node (open is rent)"
