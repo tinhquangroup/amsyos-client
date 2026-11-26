@@ -563,13 +563,14 @@ def behind_lines(data: dict[str, Any], pad: str = "  ") -> list[str]:
     lines = [
         f"{pad}{len(behind)} chain{'' if len(behind) == 1 else 's'} of yours still "
         f"run{'s' if len(behind) == 1 else ''} an older version of it; renew each (its next "
-        "patch version, checked as any define):"
+        "patch version, checked as any define: its example runs when that costs nothing, "
+        "check=paid runs it at your cost):"
     ]
     for b in behind[:MOST_BEHIND]:
         chain = str(b.get("service") or "?")
         lines.append(
             f"{pad}  {chain}@{b.get('version')} pins {b.get('pins')}: amsyos run "
-            f"service.define name={chain.split('.', 1)[-1]} renew=true"
+            f"service.define name={chain.split('.', 1)[-1]} renew=true check=free"
         )
     if len(behind) > MOST_BEHIND:
         lines.append(f"{pad}  … {len(behind) - MOST_BEHIND} more (--json lists every one)")

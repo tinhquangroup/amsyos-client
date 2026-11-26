@@ -42,7 +42,11 @@ INPUT_KEYS = (
     "required", "default", "values", "min", "max", "max_length", "multiline",
     "description", "example", "means", "schema",
 )  # fmt: skip
-SPEC_KEYS = ("tags", "schemas", "contract", "controls", "pilot", "estimate_per", "tests", "cache")
+SPEC_KEYS = (
+    "tags", "docs", "schemas", "contract", "controls", "pilot", "estimate_per", "tests", "cache",
+)  # fmt: skip
+# A card's `docs` (a customer, 2026-11-26): what describe shows whole, read without a machine.
+DOCS_MAX = 4000
 # What a file of each format is, when the card does not say (services/core/types.yaml).
 MEANS_OF_FORMAT = {
     **dict.fromkeys(("png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "svg"), "image"),
@@ -122,6 +126,12 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
   summary     What one call takes and makes, in English, 3 to 120 characters. discover
               finds the service by it.
   tags        Up to 20 words discover also finds it by: [csv, chart, plot].
+  docs        What a caller should read before a call that no input's description (at
+              most 200 characters) holds, like every word a plain-words input takes:
+              text, Markdown allowed, at most 4000 characters, in English; the words the
+              service reads stay as they are in `backticks`. `amsyos describe` shows it
+              whole, without starting a machine. Several lines: docs: | and the text
+              indented below.
   where       space: the organisation's rented node (default). node: an own node, a
               Linux computer of the organisation's joined with AMSYOS Node, at full:
               deploy builds there by node.exec (an admin), --node n_… when there are
@@ -307,6 +317,13 @@ def problems(card: dict[str, Any]) -> list[str]:
     for key in ("system", "packages", "models", "tags", "include"):
         if key in card and not isinstance(card[key], list | str):
             found.append(f"{key}: a list, like [ffmpeg]")
+    docs = card.get("docs")
+    if docs is not None and not (isinstance(docs, str) and 0 < len(docs.strip()) <= DOCS_MAX):
+        had = f" (it has {len(docs)})" if isinstance(docs, str) and docs.strip() else ""
+        found.append(
+            f"docs: text of at most {DOCS_MAX} characters{had}, Markdown allowed; several "
+            "lines as docs: | with the text indented below"
+        )
     return found + test_problems(card)
 
 

@@ -94,6 +94,7 @@ from amsyos_cli.pool import cmd_pool, cmd_restore, cmd_uninstall
 from amsyos_cli.secret import add_parsers as add_secret
 from amsyos_cli.shell import cli_hint, quoted
 from amsyos_cli.space import cmd_node
+from amsyos_cli.trying import TRY_HELP, cmd_try
 from amsyos_cli.watch import cmd_watch
 from amsyos_cli.work import cmd_promote, cmd_work
 
@@ -942,6 +943,12 @@ async def cmd_describe(args: argparse.Namespace, out: Out) -> int:
     listed = _output_entries(told)
     if listed:
         lines.append("outputs: " + ", ".join(listed))
+    # The service's own documentation, whole (at most 4000 characters): a customer,
+    # 2026-11-26, could read its vocabulary only by a call that started a machine.
+    docs = told.get("docs")
+    if isinstance(docs, str) and docs.strip():
+        lines.append("docs:")
+        lines += [f"  {row}".rstrip() for row in docs.strip("\n").splitlines()]
     for key, given in obj(told.get("estimate")).items():
         entry = obj(given)
         # `start_s` where the kernel says it, on the entry or on the whole answer (K2).
@@ -961,6 +968,10 @@ async def cmd_describe(args: argparse.Namespace, out: Out) -> int:
     if check:
         job = f" ({check['job']})" if check.get("job") else ""
         lines.append(f"check: {check.get('state') or short(check, 300)}{job}")
+        # Why none, or how to run one (a customer, 2026-11-26: "check: none" alone).
+        for key in ("why", "note"):
+            if isinstance(check.get(key), str) and check[key]:
+                lines.append(f"  {short(check[key], 400)}")
         lines += [f"  problem: {short(p, 300)}" for p in seq(check.get("problems"))[:5]]
         lines += check_lines(check)
     elif told.get("check") is not None:
@@ -1958,6 +1969,24 @@ def parser() -> Parser:
         "--dry-run", action="store_true", help="list the files and the version; send nothing"
     )
     p.add_argument("--dir", default=".", help="the repository (default here)")
+
+    p = add(
+        "try", cmd_try,
+        "run this card's current code once in the image deploy built on the rented node: no "
+        "build, no define; its log live, its files in ./out/try/<job>/",
+        epilog=TRY_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+    )  # fmt: skip
+    p.add_argument(
+        "--input", action="append", metavar="K=V",
+        help="change one input of the card's example (again for more); k=@path uploads a file",
+    )  # fmt: skip
+    p.add_argument("--params", metavar="JSON", help="the job's inputs instead of the example")
+    p.add_argument("--command", help="run this instead of the image's command, from the code")
+    p.add_argument("--timeout", type=int, help="the most seconds it may run (default 300)")
+    p.add_argument(
+        "--only", metavar="DIR", help="a card below the top one that shares its image, by folder"
+    )
+    p.add_argument("--dir", default=".", help="the card's folder (default here)")
 
     p = add("promote", cmd_promote, "move a channel of a service of yours to a version")
     p.add_argument("service", help="t_x.name, or name (your organisation's)")

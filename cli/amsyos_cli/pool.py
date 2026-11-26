@@ -159,7 +159,8 @@ def pool_lines(data: dict[str, Any]) -> list[str]:
         lines.append(
             f"behind: {len(behind)} chain{'' if len(behind) == 1 else 's'} with steps that run an "
             "older version of your service than it runs now; renew each: amsyos run "
-            f"service.define name={behind[0].split('.', 1)[-1]} renew=true"
+            f"service.define name={behind[0].split('.', 1)[-1]} renew=true check=free "
+            "(check=paid runs its example at your cost)"
         )
     if not families:
         lines.append(str(data.get("how") or "no service of yours yet"))
