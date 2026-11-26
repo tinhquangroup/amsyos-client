@@ -49,6 +49,13 @@ entries, whatever it filters (`{k: params[k] for k in params if ...}` too), and 
 `dict(...)` or `.update(...)` (`(k, v) for k, v in params.items() if ...`,
 `filter(f, params.items())`).
 
+A param the code reads as JSON (the owner, 2026-11-26: a structured input is one JSON input
+with a schema) is marked `json`: `json.loads(job.params["x"])` (orjson, ujson too; through a
+name bound to the param as well), `job.json("x")`, `Model.model_validate_json(job.params["x"])`,
+`TypeAdapter(Model).validate_json(...)`. The model it is loaded into, when the code says it
+(`Model.model_validate(json.loads(...))`, `Model(**job.json("x"))`, `model_validate_json`),
+is kept as `model`: card.py makes the schema from it (`amsyos schema x --from-model`).
+
 A default of empty text (`"watermark": ""`, `.get("x", "")`, `default=""`) is kept: card.py
 writes it `default: ''`, an optional text input (a customer's feedback). A param tested against a
 module-level tuple, list, set or dict (`p["crop"] not in CROPS`, `in FILTERS.keys()`) takes
@@ -101,6 +108,12 @@ RUNNERS = {
 }  # fmt: skip
 # Calls that end a job: a test of a file input whose branch ends with one makes it required.
 ENDS_JOB = frozenset({"fail", "exit", "_exit", "abort"})
+# What parses JSON text: `json.loads(...)` and its kin; a model's own JSON reader.
+JSON_MODULES = frozenset({"json", "orjson", "ujson", "simplejson", "rapidjson"})
+MODEL_FROM_JSON = frozenset({"model_validate_json", "parse_raw"})
+# What loads a parsed value into a model: `Model.model_validate(...)`, `parse_obj`, and
+# `TypeAdapter(Model).validate_python(...)`.
+MODEL_FROM_VALUE = frozenset({"model_validate", "parse_obj", "validate_python"})
 # Calls whose string arguments name something else than a program (a flag, an attribute, a
 # param, a file input), so never a known program's name; and those whose first argument is
 # a key (`p.get("convert")`: a param named convert).
@@ -421,6 +434,23 @@ def _callee(call: ast.Call) -> str | None:
     return func.attr if isinstance(func, ast.Attribute) else None
 
 
+def _dotted(node: ast.AST | None) -> str | None:
+    """`Plan` or `models.Plan`: the name an expression is, when it is one."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value)
+        return f"{head}.{node.attr}" if head else None
+    return None
+
+
+def _adapted(node: ast.AST | None) -> str | None:
+    """`Plan` of `TypeAdapter(Plan)`."""
+    if isinstance(node, ast.Call) and _callee(node) == "TypeAdapter" and node.args:
+        return _dotted(node.args[0])
+    return None
+
+
 def _ends_job(body: list[ast.stmt]) -> bool:
     """A branch that ends the job: `raise`, `job.fail(...)`, `sys.exit(...)`."""
     for stmt in body:
@@ -475,6 +505,9 @@ class _Reader:
         # Files written as `<stem>.<an expression>`: an output whose format a param names
         # when the expression is that param (read after the walk, `read`).
         self._chosen: list[tuple[str, ast.expr]] = []
+        # What the code parses as JSON, and the model it loads it into (read after the walk,
+        # when every name bound to a param is known).
+        self._as_json: list[tuple[ast.expr, str | None]] = []
         self._imports()
         if passes:
             self._given(passes)
@@ -672,6 +705,10 @@ class _Reader:
             param = self._param_of(fmt)
             if param:
                 self.found.choose(stem, param)
+        for given, model in self._as_json:
+            param = self._param_of(given)
+            if param and param in self.found.params:
+                self.found.param(param, json=True, model=model)
         self._around()
         self._presence()
 
@@ -921,9 +958,56 @@ class _Reader:
         tables = self.merged.get(holder.id, []) if isinstance(holder, ast.Name) else []
         return any(name in {_const_str(k) for k in t.keys} for t in tables)
 
+    # -- what the code reads as JSON
+    def _json(self, node: ast.Call) -> None:
+        """`job.json("x")`: the param x, as JSON; `json.loads(<a param>)`,
+        `Model.model_validate_json(<a param>)`: kept for after the walk (`read`)."""
+        func = node.func
+        name = _const_str(node.args[0]) if node.args else None
+        if isinstance(func, ast.Attribute) and func.attr == "json" and self._is_job(func.value):
+            if name:
+                up = self.parent.get(node)
+                optional = isinstance(up, ast.BoolOp) and isinstance(up.op, ast.Or)
+                self.found.param(
+                    name, node.lineno, type="string", json=True, model=self._model_of(node),
+                    required=None if optional else True,
+                )  # fmt: skip
+                self.found.how.add("sdk")
+            return
+        if not node.args:
+            return
+        if (isinstance(func, ast.Attribute) and func.attr == "loads"
+                and isinstance(func.value, ast.Name) and func.value.id in JSON_MODULES) or (
+                isinstance(func, ast.Name) and func.id == "loads"):  # fmt: skip
+            self._as_json.append((node.args[0], self._model_of(node)))
+        elif isinstance(func, ast.Attribute) and func.attr in MODEL_FROM_JSON:
+            self._as_json.append((node.args[0], _dotted(func.value)))
+        elif isinstance(func, ast.Attribute) and func.attr == "validate_json":
+            self._as_json.append((node.args[0], _adapted(func.value)))
+
+    def _model_of(self, parsed: ast.Call) -> str | None:
+        """The model a parsed value goes into: `Model.model_validate(<it>)`,
+        `TypeAdapter(Model).validate_python(<it>)`, `Model(**<it>)`."""
+        up = self.parent.get(parsed)
+        if isinstance(up, ast.keyword) and up.arg is None:
+            call = self.parent.get(up)
+            named = _dotted(call.func) if isinstance(call, ast.Call) else None
+            return named if named and named.rsplit(".", 1)[-1][:1].isupper() else None
+        if (
+            isinstance(up, ast.Call)
+            and isinstance(up.func, ast.Attribute)
+            and up.func.attr in MODEL_FROM_VALUE
+            and parsed in up.args
+        ):
+            if up.func.attr == "validate_python":
+                return _adapted(up.func.value)
+            return _dotted(up.func.value)
+        return None
+
     # -- reads of one param or input
     def _call(self, node: ast.Call) -> None:
         func = node.func
+        self._json(node)
         if isinstance(func, ast.Attribute) and func.attr == "get" and node.args:
             key = self._key_of(func.value)
             name = _const_str(node.args[0])

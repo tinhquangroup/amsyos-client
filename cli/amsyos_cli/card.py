@@ -15,6 +15,7 @@ import ast
 import json
 import re
 import sys
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,11 @@ SPEC_KEYS = (
 )  # fmt: skip
 # A card's `docs` (a customer, 2026-11-26): what describe shows whole, read without a machine.
 DOCS_MAX = 4000
+# A schema named by its file (`schema: plan.json`, `schemas: {totals: totals.json}`) is read
+# from the card's `schemas/` folder into the spec (`load`), as the kernel reads a package's.
+SCHEMA_DIR = "schemas"
+SCHEMA_FILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,80}\.json")
+UNREAD = "_schemas_unread"  # a schema file `load` could not read → why; `problems` says it
 # What a file of each format is, when the card does not say (services/core/types.yaml).
 MEANS_OF_FORMAT = {
     **dict.fromkeys(("png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "svg"), "image"),
@@ -178,11 +184,18 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
                 name: {type: string, multiline: true, max_length: 12000}   (several lines:
                        a script, subtitles, a prompt; else one line)
                 name: {type: file, means: sheet}    (means: what the file is; below)
+                name: {type: string, multiline: true, schema: name.json}   (structured:
+                       a plan, a scene, nested options. One JSON input, its shape a JSON
+                       Schema in schemas/name.json: AMSYOS refuses a call that does not fit
+                       before a machine starts, and clients see the shape. `amsyos schema
+                       name --from-model main.py:Plan` (or --from-example) writes it; the
+                       code reads it with job.json("name"). Also on a file of JSON.)
               The program reads them from $AMSYOS_JOB/job.json ({"params": {...},
               "inputs": {"name": "in/<file>"}}), or `from amsyos import job` (job.params,
-              job.input("name"); job.service, the id of the service the job is for, which
-              tells apart the cards that share an image; job.service_version; job.folder,
-              the job's folder), or `amsyos-job param name` in any language.
+              job.input("name"), job.json("name"): a JSON input parsed; job.service, the
+              id of the service the job is for, which tells apart the cards that share an
+              image; job.service_version; job.folder, the job's folder), or `amsyos-job
+              param name` in any language.
   outputs     What a call makes, one file each: name: {type: file, format: png,
               means: image}. The program writes out/<name>.<format> in its job folder.
               Data a program reads back: format npy, npz, bin or parquet, means data.
@@ -220,7 +233,8 @@ Values init could not read from the code are written <fill: ...>: deploy refuses
               example succeeds, and a failing test fails the version's check.
   include     Files deploy would leave out but the service needs: [notes.md].
   schemas, contract, controls, pilot, estimate_per: as service.check's spec "{}"
-              lists them (`amsyos run service.check spec='{}' --wait`).
+              lists them (`amsyos run service.check spec='{}' --wait`). A schema may be
+              named by its file in schemas/ (schemas: {totals: totals.json}).
 
 {pack}
 Check a card: `amsyos card --check`, here and then by AMSYOS's service.check when
@@ -235,7 +249,9 @@ CARD_HELP = CARD_HELP_TEXT.replace("{pack}", PACK_RULES)
 
 
 # ---------------------------------------------------------------- reading
-def load(root: Path) -> dict[str, Any]:
+def load(root: Path, *, inline: bool = True) -> dict[str, Any]:
+    """amsyos.yaml as a mapping; with `inline`, each schema it names by file read into it
+    (`inline_schemas`), so that the spec carries it as the kernel takes it."""
     path = root / CARD
     try:
         text = path.read_text(encoding="utf-8")
@@ -251,7 +267,50 @@ def load(root: Path) -> dict[str, Any]:
         # `version: 1.10` unquoted reads as the number 1.1: the file's own text is meant.
         found = re.search(r"(?m)^version:\s*([0-9][0-9.]*)\s*(?:#.*)?$", text)
         card["version"] = found.group(1) if found else str(card["version"])
+    if inline:
+        inline_schemas(card, root)
     return card
+
+
+def schema_file(root: Path, named: str) -> tuple[dict[str, Any] | None, str | None]:
+    """The schema a card names by its file, read from its `schemas/` folder, or why not."""
+    if not SCHEMA_FILE.fullmatch(named):
+        return None, f"{named[:60]!r}: a plain file name ending .json, in {SCHEMA_DIR}/"
+    path = root / SCHEMA_DIR / named
+    try:
+        data: Any = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return None, f"no file {SCHEMA_DIR}/{named}"
+    except (OSError, ValueError) as exc:
+        return None, f"{SCHEMA_DIR}/{named} is not JSON ({str(exc)[:120]})"
+    if not isinstance(data, dict):
+        return None, f"{SCHEMA_DIR}/{named}: a JSON Schema is a JSON object"
+    return obj(data), None
+
+
+def inline_schemas(card: dict[str, Any], root: Path) -> None:
+    """`schema: plan.json` on an input and `schemas: {totals: totals.json}`: each file of the
+    card's `schemas/` folder read in its place; one that cannot be is kept as written, and
+    why is kept under UNREAD for `problems`."""
+    unread: dict[str, str] = {}
+    for in_name, spec in obj(card.get("inputs")).items():
+        named = obj(spec).get("schema")
+        if isinstance(named, str):
+            data, why = schema_file(root, named)
+            if data is None:
+                unread[f"inputs.{in_name}.schema"] = why or named
+            else:
+                spec["schema"] = data
+    outputs = obj(card.get("schemas"))
+    for out_name, named in list(outputs.items()):
+        if isinstance(named, str):
+            data, why = schema_file(root, named)
+            if data is None:
+                unread[f"schemas.{out_name}"] = why or named
+            else:
+                outputs[out_name] = data
+    if unread:
+        card[UNREAD] = unread
 
 
 def problems(card: dict[str, Any]) -> list[str]:
@@ -314,6 +373,14 @@ def problems(card: dict[str, Any]) -> list[str]:
                         f"inputs.{in_name}.default: '' on a required input: drop one of them "
                         "(`default: ''` says it may be left out, as empty text)"
                     )
+    for field_, why in obj(card.get(UNREAD)).items():
+        name = field_.split(".")[1]
+        found.append(
+            f"{field_}: {why}: amsyos schema {name} --from-model <file.py>:<Model> or "
+            f"--from-example writes it (or drop the line: a card without a schema still works)"
+            if field_.startswith("inputs.")
+            else f"{field_}: {why}"
+        )
     for key in ("system", "packages", "models", "tags", "include"):
         if key in card and not isinstance(card[key], list | str):
             found.append(f"{key}: a list, like [ffmpeg]")
@@ -1381,6 +1448,7 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
                 else f"{FILL}: what the {in_name} file holds, for a caller>"
             ),
         }
+    as_json: list[str] = []
     for param in params:
         facts = found.params[param]
         spec: dict[str, Any] = {}
@@ -1419,6 +1487,12 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
         ):
             said = f"{FILL}: what {param} means for a caller>"
         spec["description"] = said
+        if facts.get("json") and "enum" not in spec:
+            # Read as JSON (the owner, 2026-11-26): one JSON input with its schema.
+            spec["type"] = "string"
+            spec["multiline"] = True
+            spec["schema"] = f"{param}.json"
+            as_json.append(param)
         inputs[param] = spec
     outputs: dict[str, Any] = {}
     for out_name, fmt in found.outputs.items():
@@ -1445,6 +1519,8 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
             f"outputs.{out_name}: the code writes it in the format {param} names: make {param} "
             f"an enum of formats ({param}: {{enum: [wav, mp3], default: wav}})"
         )
+    for param in as_json:
+        notes.append(schema_for(root, param, found.params[param].get("model"), command or serve))
     example = example_for(root, inputs)
     read = sorted(found.how) or ["file names only"]
     notes.append(
@@ -1514,6 +1590,99 @@ def propose(root: Path, name: str | None = None) -> tuple[dict[str, Any], list[s
     card["outputs"] = outputs
     card["example"] = example
     return card, notes
+
+
+def importable(path: Path) -> bool:
+    """A module whose top level only defines (imports, functions, classes, constants without
+    a call, an `if __name__ == "__main__":`): importing it runs nothing of a job."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return False
+    defines = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in tree.body:
+        if isinstance(node, defines) or (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+        ):
+            continue
+        if isinstance(node, ast.Assign | ast.AnnAssign) and not any(
+            isinstance(n, ast.Call) for n in ast.walk(node)
+        ):
+            continue
+        if isinstance(node, ast.Try) and all(
+            isinstance(s, ast.Import | ast.ImportFrom) for s in node.body
+        ):
+            continue
+        test = node.test if isinstance(node, ast.If) else None
+        if (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+        ):
+            continue
+        return False
+    return True
+
+
+def model_files(cls: str, paths: list[Path]) -> list[Path]:
+    """Of these files, those that define the class `cls` at their top."""
+    found: list[Path] = []
+    for path in paths:
+        if path.suffix != ".py":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        if any(isinstance(n, ast.ClassDef) and n.name == cls for n in tree.body):
+            found.append(path)
+    return found
+
+
+def schema_for(root: Path, param: str, model: str | None, command: str | None) -> str:
+    """For an input the code reads as JSON: its schema written from the model the code loads
+    it into, when that model's module imports cleanly (in an empty folder, by the project's
+    Python); else the note of how to write it."""
+    file = f"{SCHEMA_DIR}/{param}.json"
+    target = root / file
+    if target.is_file():
+        return f"inputs.{param}: the code reads it as JSON; its schema is {file} (there already)"
+    cls = model.rsplit(".", 1)[-1] if model else None
+    entry = _entry(root, command)
+    paths = local_modules(root, entry) if entry is not None else _sources(root)
+    files = model_files(cls, paths) if cls else []
+    if cls is None or len(files) != 1:
+        return (
+            f"inputs.{param}: the code reads it as JSON: write its shape into {file} with "
+            f"amsyos schema {param} --from-model <file.py>:<Model> (the model your code "
+            f"validates it with), or --from-example once example.{param} holds a whole value; "
+            "card --check says it is missing until then"
+        )
+    rel = files[0].resolve().relative_to(root.resolve()).as_posix()
+    how = f"amsyos schema {param} --from-model {rel}:{cls}"
+    if not importable(files[0]):
+        return (
+            f"inputs.{param}: the code reads it as JSON into {cls}: write {file} with {how} "
+            f"(not imported here: {rel} does more than define when imported)"
+        )
+    from amsyos_cli import schema as schemas  # noqa: PLC0415 - it imports this module
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="amsyos-init-") as empty:
+            made, by = schemas.from_model(root, f"{rel}:{cls}", cwd=Path(empty), timeout=20)
+    except CliError as exc:
+        said = exc.hint[:240]
+        return f"inputs.{param}: read as JSON into {cls}: write {file} with {how} ({said})"
+    if len(json.dumps(made, ensure_ascii=False, sort_keys=True)) > schemas.SCHEMA_MOST:
+        most = f"{schemas.SCHEMA_MOST:,}"
+        return f"inputs.{param}: the schema of {cls} is over {most} characters: write {file}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(made, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return (
+        f"inputs.{param}: the code reads it as JSON into {cls}: wrote {file} from {rel}:{cls} "
+        f"({by}); AMSYOS refuses a call whose {param} does not fit before it runs. Changed "
+        f"the model? {how} --force"
+    )
 
 
 def example_for(root: Path, inputs: dict[str, Any]) -> dict[str, Any]:
@@ -1777,8 +1946,10 @@ def render(card: dict[str, Any]) -> str:
         "#   required, default, description, max_length, min, max, multiline: true (text of",
         "#   several lines, max_length up to 12000)}, or {enum: [a, b]};",
         "#   a file also says what it is: means: image|video|audio|sheet|mesh|document|text.",
+        "#   Structured (a plan, a scene): one JSON input with schema: <name>.json, its shape",
+        "#   in schemas/ (`amsyos schema <name> --from-model main.py:Plan` writes it).",
         "#   The program reads them from $AMSYOS_JOB/job.json, `from amsyos import job`",
-        "#   (job.params, job.input(name)) or `amsyos-job param <name>`.",
+        "#   (job.params, job.input(name), job.json(name)) or `amsyos-job param <name>`.",
     ]
     inputs = obj(card.get("inputs"))
     lines.append("inputs:" + ("" if inputs else " {}"))
@@ -1814,7 +1985,7 @@ def render(card: dict[str, Any]) -> str:
     else:
         lines.append("# tests: []")
     known = {k for k, _, _ in TEMPLATE} | {"inputs", "outputs", "example", "tests"}
-    rest = {k: v for k, v in card.items() if k not in known}
+    rest = {k: v for k, v in card.items() if k not in known and k != UNREAD}
     if rest:
         lines.append("")
         lines += [f"{k}: {_flow(v)}" for k, v in rest.items()]

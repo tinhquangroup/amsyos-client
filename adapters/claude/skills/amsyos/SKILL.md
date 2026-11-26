@@ -9,9 +9,8 @@ description: Use AMSYOS when the work needs a GPU or more compute than this mach
 
 - The project's brief, where `amsyos init` ran: `.amsyos/plugins/amsyos/skills/amsyos/brief.md`
   in the repository, written by `amsyos sync` (its SessionStart hook too). Read it first.
-- `amsyos run --wait` and `amsyos wait <job>` wait as long as the job takes. Exit 0: done;
-  1: failed or refused; 3: it waits for you, for a person (`run --wait`; `amsyos wait` goes
-  on until they decide), or `--timeout` passed. A test of a check prints what it read.
+- `amsyos run --wait`, `amsyos wait <job>`: wait for the end. Exit 0: done; 1: failed or refused; 3: it waits for you
+  or a person (`amsyos wait` holds until they decide), or `--timeout` passed. A check's test prints what it read.
 - `eta_s` is the wait until the result (`start_s` of it: a new machine starting), `est_cost`
   the credit ("default estimate": no run yet); `amsyos result`: the real cost and time, by step.
 - `amsyos deploy` prints the files it packs, then `service@version` with the check of the

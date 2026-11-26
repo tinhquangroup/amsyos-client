@@ -11,9 +11,11 @@ params}` (`_meta["amsyos/service_id"]`), never as a tool of its own.
 Inputs (`input_schema`), by the manifest's types (kernel/manifest.py `InputType`):
 
     str     string, minLength 1, maxLength (its max_length, else 1000); a single line also
-            a pattern without control characters (left out: several lines may come); with
-            a `schema` (contract 2: JSON text) contentMediaType application/json and that
-            schema as contentSchema; its `example` as examples
+            a pattern without control characters (left out: several lines may come); its
+            `example` as examples. With a `schema` (contract 2: JSON text), anyOf that
+            string (contentMediaType application/json, its contentSchema a $ref to the
+            other form) or the schema itself: the kernel takes the JSON itself too and
+            hands the service its compact text
     int     integer, minimum / maximum          float  number, minimum / maximum
     bool    boolean
     enum    enum of its values, typed string, integer or number as the values are; one that
@@ -64,6 +66,7 @@ SINGLE_LINE = "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
 FOLDER_PATTERN = "^folder:[a-z][a-z0-9_-]{0,39}(/.*)?$"
 ASSET_SAYS = "A file: 'asset://…' (asset.upload stores one)"
 FOLDER_SAYS = "A file or folder on your organisation's node, 'folder:<name>/<path>'"
+JSON_TEXT_SAYS = "The JSON itself, or the same JSON as text"  # a `str` with a schema
 FORMAT_SAYS = "The file format of output"  # an enum whose value an output's format is
 JSON = "application/json"
 EMBEDDED = "urn:amsyos:input:"  # the `$id` of a file's own schema inside the inputs'
@@ -153,6 +156,14 @@ def _unembedded(name: str, schema: object) -> dict[str, Any]:
     return given
 
 
+def _ref_of(name: str, given: Mapping[str, Any]) -> str:
+    """Where an input of JSON text has its own schema in the inputs' schema, for its text's
+    `contentSchema`: its `$id` when it is a resource of its own (`_embedded`), else the
+    second form of its anyOf."""
+    own = given.get("$id")
+    return own if isinstance(own, str) else f"#/properties/{name}/anyOf/1"
+
+
 def property_of(name: str, spec: Mapping[str, Any]) -> dict[str, Any]:
     """One input (the manifest's words: type, values, min, max, …) as a JSON Schema."""
     kind = spec.get("type")
@@ -163,8 +174,11 @@ def property_of(name: str, spec: Mapping[str, Any]) -> dict[str, Any]:
         prop = {"type": "string", "minLength": 1, "maxLength": spec.get("max_length") or STR_MAX}
         if not spec.get("multiline"):
             prop["pattern"] = SINGLE_LINE
-        if schema is not None:
-            prop |= {"contentMediaType": JSON, "contentSchema": _embedded(name, schema)}
+        if schema is not None:  # anyOf its text or the JSON itself, the schema said once
+            given = _embedded(name, schema)
+            prop |= {"contentMediaType": JSON, "contentSchema": {"$ref": _ref_of(name, given)}}
+            prop = {"anyOf": [prop, given]}
+            said = _line(f"{JSON_TEXT_SAYS}: {said}" if said else JSON_TEXT_SAYS)
         if isinstance(spec.get("example"), str):
             prop["examples"] = [spec["example"]]
     elif kind in ("int", "float"):
@@ -457,17 +471,49 @@ def _strip(said: object, prefix: str) -> str | None:
     return text or None
 
 
+def _json_text(prop: Mapping[str, Any]) -> bool:
+    """A string of JSON text (`contentMediaType` application/json)."""
+    return prop.get("type") == "string" and prop.get("contentMediaType") == JSON
+
+
+def _text_input(name: str, prop: Mapping[str, Any], notes: list[str]) -> dict[str, Any]:
+    """A string property as a card's text input: its length, lines and JSON schema."""
+    told: dict[str, Any] = {"type": "string"}
+    if _json_text(prop) and _map(prop.get("contentSchema")):
+        told["schema"] = _unembedded(name, prop["contentSchema"])
+    most = prop.get("maxLength")
+    if isinstance(most, int) and most != STR_MAX:
+        if most > LONG_STR_MAX:
+            notes.append(f"{name}: maxLength {most} is over {LONG_STR_MAX}: at most that")
+        told["max_length"] = max(1, min(most, LONG_STR_MAX))
+    pattern = prop.get("pattern")
+    if pattern != SINGLE_LINE:
+        told["multiline"] = True  # an outside tool's text may hold several lines
+        if pattern is not None:
+            notes.append(f"{name}: its pattern is not carried (the code checks it)")
+    if prop.get("format") not in (None, "uri"):
+        notes.append(f"{name}: format {prop['format']} is not carried (the code checks it)")
+    if isinstance(prop.get("minLength"), int) and prop["minLength"] > 1:
+        notes.append(f"{name}: minLength {prop['minLength']} is not carried")
+    return told
+
+
 def _card_input(name: str, raw: Mapping[str, Any], notes: list[str]) -> dict[str, Any]:
     prop = _plain(raw)
     told: dict[str, Any] = {}
     said: str | None = _line(prop.get("description")) or None
     options = [_map(o) for o in _list(prop.get("anyOf") or prop.get("oneOf"))]
     refs = [o for o in options if _asset_ref(o)]
+    texts = [o for o in options if _json_text(o)]
     kind = prop.get("type")
     if refs and len(options) == 2:  # a file, or its JSON itself
         given = next(o for o in options if o is not refs[0])
         told = {"type": "file", "schema": _unembedded(name, given)}
         said = _strip(said, ASSET_SAYS)
+    elif texts and len(options) == 2:  # JSON text, or the JSON itself: one text input
+        given = next(o for o in options if o is not texts[0])
+        told = {**_text_input(name, texts[0], notes), "schema": _unembedded(name, given)}
+        said = _strip(said, JSON_TEXT_SAYS)
     elif _asset_ref(prop):
         told = {"type": "file"}
         means = means_of_media(prop.get("contentMediaType"))
@@ -491,23 +537,7 @@ def _card_input(name: str, raw: Mapping[str, Any], notes: list[str]) -> dict[str
         told = {"type": "string"}
         said = _strip(said, FOLDER_SAYS)
     elif kind == "string":
-        told = {"type": "string"}
-        if prop.get("contentMediaType") == JSON and _map(prop.get("contentSchema")):
-            told["schema"] = _unembedded(name, prop["contentSchema"])
-        most = prop.get("maxLength")
-        if isinstance(most, int) and most != STR_MAX:
-            if most > LONG_STR_MAX:
-                notes.append(f"{name}: maxLength {most} is over {LONG_STR_MAX}: at most that")
-            told["max_length"] = max(1, min(most, LONG_STR_MAX))
-        pattern = prop.get("pattern")
-        if pattern != SINGLE_LINE:
-            told["multiline"] = True  # an outside tool's text may hold several lines
-            if pattern is not None:
-                notes.append(f"{name}: its pattern is not carried (the code checks it)")
-        if prop.get("format") not in (None, "uri"):
-            notes.append(f"{name}: format {prop['format']} is not carried (the code checks it)")
-        if isinstance(prop.get("minLength"), int) and prop["minLength"] > 1:
-            notes.append(f"{name}: minLength {prop['minLength']} is not carried")
+        told = _text_input(name, prop, notes)
     elif kind in ("integer", "number"):
         told = {"type": kind}
         for key, word in (("minimum", "min"), ("maximum", "max")):

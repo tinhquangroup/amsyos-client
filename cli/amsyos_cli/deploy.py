@@ -440,13 +440,17 @@ async def checked_problems(
     """Each card's problems that AMSYOS's `service.check` finds and were not found here,
     by card, before anything is uploaded or built (a customer, 2026-11-25: an output format
     no check reads and a description over 200 characters were found at service.define,
-    after a build)."""
+    after a build). Its warnings (an input that is JSON with no schema, 2026-11-26) are
+    said as they come, and kept in the JSON answer (`card_warnings`): never a refusal."""
     found: list[str] = []
     for entry in entries:
         card: dict[str, Any] = entry["card"]
         if not cards.NAME_RE.fullmatch(str(card.get("service"))):
             continue  # its own problem, said already
         told, _ = await check_card(api, card, entry["examples"], compute=compute)
+        for warning in seq(told.get("warnings")):
+            api.out.note(f"warning: {_at(entry)}{warning}")
+            api.out.extra.setdefault("card_warnings", []).append(f"{_at(entry)}{warning}")
         here = cards.problems(card) + cards.example_problems(card) + cards.left_to_fill(card)
         said = cards.server_problems([str(p) for p in seq(told.get("problems"))], here)
         found += [f"{_at(entry)}{p}" for p in said]
@@ -1209,6 +1213,23 @@ NODE_DIR = "_node"  # where the package carries the build and the run of an own 
 NODE_EXEC = (
     f"python3 -m zipfile -e in/file1.zip src && python3 src/{NODE_DIR}/build.py in/file1.zip src"
 )
+# A Windows node (cmd runs node.exec's line): Windows' own tar (10 1803 and later) unpacks the
+# package, Windows PowerShell 5.1 runs nodekit/build.ps1, which builds with uv.
+NODE_EXEC_WINDOWS = (
+    r"mkdir src && %SystemRoot%\System32\tar.exe -xf in\file1.zip -C src && powershell "
+    rf"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File src\{NODE_DIR}\build.ps1 "
+    r"in\file1.zip src"
+)
+# What cmd runs before a job's command line on Windows takes up to about 600 of the 1024
+# characters CreateProcessWithLogonW takes (the node then tells the job less, sys_windows.rs).
+NODE_COMMAND_MOST_WINDOWS = 600
+NODE_PYTHON_WINDOWS = "3.12"  # uv's Python on a Windows node when the code has no .python-version
+_PYTHON_VERSION = re.compile(r"3\.\d{1,2}(\.\d{1,2})?")
+_CMD_UNSAFE = re.compile(r'["%!^&|<>\r\n]')  # never in an image folder a cmd line names
+_WINDOWS_DIR = re.compile(r"[A-Za-z]:[\\/]")
+# amsyos-fetch for a Windows node's setup and jobs: the same Python program, by the venv's
+# python, which run.cmd and build.ps1 put first on PATH.
+FETCH_CMD = b'@python "%~dp0amsyos-fetch" %*\r\n'
 NODE_UPDATE = (
     f"update AMSYOS Node on that machine to {NODE_MIN} or later: stop it, run the new program's "
     "setup again (Linux: sudo amsyos-node setup, with the same --jobs and --services as "
@@ -1222,7 +1243,14 @@ On an own node (the card's where: node; --node n_… when your organisation has 
      account, one environment for every version with the same packages;
   2. node.deploy puts the package there with the card's command (and serve);
   3. service.define with compute: node; its check runs the example on the node.
-A Linux node; free. `from amsyos import job` needs AMSYOS Node {NODE_MIN} or later there.
+A Linux or Windows node; free. `from amsyos import job` needs AMSYOS Node {NODE_MIN} or later.
+A Windows node (node list: windows; Windows 10 1803 or later): uv builds a Python virtual
+environment instead (the code's .python-version, else {NODE_PYTHON_WINDOWS}; the packages, PyTorch's
+CPU build when the code imports torch, the models, then `setup` as a cmd line) under
+%ProgramData%\\AMSYOS\\Node\\builds\\<your organisation> of the node (AMSYOS_BUILD_HOME of the
+node's account moves it), which amsyos-job may read and run, never write; each job runs as
+amsyos-job through _node\\run.cmd. Not there yet: `system`, a runtime other than python,
+PyTorch for CUDA, your build cache.
 Cards that share one image: deploy in the top card's folder also takes every card below it
 (services/*/amsyos.yaml, any depth) that names the same image with where: node. One build,
 then steps 2-3 for each card in turn (the next once the previous card's check has ended),
@@ -1287,10 +1315,30 @@ def _imports(root: Path, files: list[str]) -> set[str]:
     return found
 
 
-def node_build(root: Path, made: dict[str, Any], version: str, gpu: bool) -> dict[str, Any]:
+def _python_of(root: Path, files: list[str]) -> str:
+    """The Python a Windows node's build installs: the code's `.python-version` (uv's and
+    pyenv's file: its first line that is no comment), else NODE_PYTHON_WINDOWS."""
+    if ".python-version" not in files:
+        return NODE_PYTHON_WINDOWS
+    text = (root / ".python-version").read_text(encoding="utf-8", errors="replace")
+    lines = [x.strip() for x in text.splitlines() if x.strip() and not x.lstrip().startswith("#")]
+    return lines[0][:40] if lines else NODE_PYTHON_WINDOWS
+
+
+def node_build(
+    root: Path,
+    made: dict[str, Any],
+    version: str,
+    gpu: bool,
+    *,
+    windows: bool = False,
+    org: str | None = None,
+) -> dict[str, Any]:
     """`_node/build.json`: what nodekit/build.py makes on the node, from the card. The
     environment is named by a hash of what is in it, so a version with the same packages
-    takes the one made before."""
+    takes the one made before. A Windows node's (`windows`): what nodekit/build.ps1 makes with
+    uv, a virtual environment (`venv-<hash>`) of the Python `_python_of` says, PyTorch's CPU
+    build, and `org`, whose build home it is (TODO(review): isolation)."""
     card: dict[str, Any] = made["card"]
     files = [str(f["file"]) for f in made["files"]]
     runtime = str(card.get("runtime", "python"))
@@ -1308,30 +1356,85 @@ def node_build(root: Path, made: dict[str, Any], version: str, gpu: bool) -> dic
     if imports & set(NODE_TORCH) and not any(n.startswith("torch") for n in named):
         torch = {
             "packages": [p for m, p in NODE_TORCH.items() if m == "torch" or m in imports],
-            "index": TORCH_INDEX[gpu],
+            "index": TORCH_INDEX[gpu and not windows],
         }
     models = _listed(card.get("models"))
+    held = hashlib.sha256((root / requirements).read_bytes()).hexdigest() if requirements else None
+    own_module = "amsyos.py" in files or "amsyos/__init__.py" in files
+    needs_module = runtime == "python" and "amsyos" in imports and not own_module
+    if windows:
+        python = _python_of(root, files)
+        what = {"python": python, "packages": packages, "requirements": held, "torch": torch}
+        key = hashlib.sha256(json.dumps(what, sort_keys=True).encode()).hexdigest()[:12]
+        return {
+            "os": "windows", "image": cards.image_of(card), "version": version,
+            "env": f"venv-{key}", "python": python, "packages": packages,
+            "requirements": requirements, "torch": torch, "models": models,
+            "setup": str(card.get("setup") or ""), "needs_module": needs_module,
+            "node_min": NODE_MIN, "org": org,
+        }  # fmt: skip
     conda = list(NODE_RUNTIMES.get(runtime, NODE_RUNTIMES["python"]))
     if runtime != "python" and (packages or requirements or models):
         conda += NODE_RUNTIMES["python"]  # pip and huggingface_hub need a Python
     conda += _listed(card.get("system"))
-    held = hashlib.sha256((root / requirements).read_bytes()).hexdigest() if requirements else None
     what = {"conda": conda, "packages": packages, "requirements": held, "torch": torch}
     key = hashlib.sha256(json.dumps(what, sort_keys=True).encode()).hexdigest()[:12]
-    own_module = "amsyos.py" in files or "amsyos/__init__.py" in files
     return {
         "image": cards.image_of(card), "version": version, "env": f"env-{key}", "conda": conda,
         "packages": packages, "requirements": requirements, "torch": torch, "models": models,
-        "setup": str(card.get("setup") or ""),
-        "needs_module": runtime == "python" and "amsyos" in imports and not own_module,
+        "setup": str(card.get("setup") or ""), "needs_module": needs_module,
         "node_min": NODE_MIN,
     }  # fmt: skip
 
 
+def windows_problems(root: Path, card: dict[str, Any], build: dict[str, Any]) -> list[str]:
+    """What a build on a Windows node cannot make yet, each with what to do instead: another
+    runtime than Python, `system` (conda-forge has no Windows programs here), a Python that is
+    no version, PyTorch for CUDA (a card that requires a GPU, or a CUDA build named)."""
+    found: list[str] = []
+    runtime = str(card.get("runtime", "python"))
+    if runtime != "python":
+        found.append(
+            f"runtime: {runtime}: a Windows node builds Python only (uv); deploy it on a Linux "
+            "node (--node), or where: space"
+        )
+    system = _listed(card.get("system"))
+    if system:
+        found.append(
+            f"system: {' '.join(system[:5])}: a Windows node gets no conda-forge programs; "
+            "install them on that machine where the job account amsyos-job finds them (the "
+            "machine's PATH) and drop system, or deploy on a Linux node (--node)"
+        )
+    if not _PYTHON_VERSION.fullmatch(str(build.get("python"))):
+        found.append(
+            f".python-version: '{short(str(build.get('python')), 40)}': a Windows node installs "
+            f"3.X or 3.X.Y (without the file, {NODE_PYTHON_WINDOWS})"
+        )
+    named = list(build["packages"])
+    if build.get("requirements"):
+        text = (root / str(build["requirements"])).read_text(encoding="utf-8", errors="replace")
+        named += text.splitlines()
+    cuda = [
+        n.strip() for n in named
+        if ("+cu" in n and _pip_name(n).startswith("torch")) or "download.pytorch.org/whl/cu" in n
+    ]  # fmt: skip
+    gpu = str(obj(card.get("resources")).get("gpu") or "none") == "required"
+    torch = bool(build.get("torch")) or any(_pip_name(n).startswith("torch") for n in named)
+    if cuda or (gpu and torch):
+        found.append(
+            (f"{short(cuda[0], 80)}: " if cuda else "resources.gpu: required, with PyTorch: ")
+            + "a Windows node gets PyTorch's CPU build only; resources.gpu: optional (or none) "
+            "and torch without +cu, or deploy on a Linux node with a GPU (--node)"
+        )
+    return found
+
+
 def node_package(root: Path, made: dict[str, Any], build: dict[str, Any]) -> bytes:
     """The package of an own node: the files deploy packs, and `_node/` (build.py, run.sh,
-    amsyos-fetch, build.json); a .zip, as node.deploy takes it, the same bytes for the same
-    files. node.exec builds from it, node.deploy unpacks it as the service's folder."""
+    amsyos-fetch, build.json; a Windows node's build.ps1, run.cmd and amsyos-fetch.cmd, with
+    CRLF line ends, instead of build.py and run.sh); a .zip, as node.deploy takes it, the same
+    bytes for the same files. node.exec builds from it, node.deploy unpacks it as the
+    service's folder."""
     clash = [str(f["file"]) for f in made["files"] if str(f["file"]).split("/")[0] == NODE_DIR]
     if clash:
         raise CliError(
@@ -1352,8 +1455,13 @@ def node_package(root: Path, made: dict[str, Any], build: dict[str, Any]) -> byt
             path = root / str(row["file"])
             mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
             put(str(row["file"]), path.read_bytes(), mode)
-        put(f"{NODE_DIR}/build.py", (NODE_KIT / "build.py").read_bytes(), 0o755)
-        put(f"{NODE_DIR}/run.sh", (NODE_KIT / "run.sh").read_bytes(), 0o755)
+        if build.get("os") == "windows":
+            put(f"{NODE_DIR}/build.ps1", _crlf(NODE_KIT / "build.ps1"), 0o644)
+            put(f"{NODE_DIR}/run.cmd", _crlf(NODE_KIT / "run.cmd"), 0o644)
+            put(f"{NODE_DIR}/bin/amsyos-fetch.cmd", FETCH_CMD, 0o644)
+        else:
+            put(f"{NODE_DIR}/build.py", (NODE_KIT / "build.py").read_bytes(), 0o755)
+            put(f"{NODE_DIR}/run.sh", (NODE_KIT / "run.sh").read_bytes(), 0o755)
         put(f"{NODE_DIR}/bin/amsyos-fetch", (NODE_KIT / "fetch.py").read_bytes(), 0o755)
         put(f"{NODE_DIR}/build.json", json.dumps(build, sort_keys=True, indent=1).encode(), 0o644)
     package = raw.getvalue()
@@ -1366,23 +1474,66 @@ def node_package(root: Path, made: dict[str, Any], build: dict[str, Any]) -> byt
     return package
 
 
-def node_commands(card: dict[str, Any], image_dir: str) -> dict[str, str]:
+def _crlf(path: Path) -> bytes:
+    """A kit file for Windows with CRLF line ends, whatever git checked it out with (cmd
+    misreads a batch file's labels with bare LF)."""
+    return path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+
+
+def _windows_dir(image_dir: str) -> bool:
+    """An image folder a Windows node's build named (C:\\…)."""
+    return bool(_WINDOWS_DIR.match(image_dir))
+
+
+def node_commands(
+    card: dict[str, Any], image_dir: str, *, windows: bool | None = None
+) -> dict[str, str]:
     """node.deploy's `command` (and `serve`): the card's, run by `_node/run.sh` in the
-    image's folder on the node, with its environment."""
+    image's folder on the node, with its environment. On a Windows node (`windows`, else
+    told by the folder's form), cmd's line `call _node\\run.cmd "<folder>" && <the card's>`:
+    run.cmd sets the environment in that cmd and goes to the folder, then the card's command
+    runs there and its exit code is the job's."""
+    win = _windows_dir(image_dir) if windows is None else windows
+    most = NODE_COMMAND_MOST_WINDOWS if win else NODE_COMMAND_MOST
+    if win and _CMD_UNSAFE.search(image_dir):
+        raise CliError(
+            "BAD_ANSWER", f"the node's image folder {short(image_dir, 200)} has a character cmd "
+            "would not take as text: set AMSYOS_BUILD_HOME of the node's account to a plain "
+            "folder, then amsyos deploy --force",
+        )  # fmt: skip
     told: dict[str, str] = {}
     for key in ("command", "serve"):
         given = str(card.get(key) or "").strip()
         if not given:
             continue
-        told[key] = f"sh {NODE_DIR}/run.sh {shlex.quote(image_dir)} {shlex.quote(given)}"
-        if "\n" in given or len(told[key]) > NODE_COMMAND_MOST:
+        if win:
+            told[key] = f'call {NODE_DIR}\\run.cmd "{image_dir}" && {given}'
+        else:
+            told[key] = f"sh {NODE_DIR}/run.sh {shlex.quote(image_dir)} {shlex.quote(given)}"
+        if "\n" in given or len(told[key]) > most:
             raise CliError(
                 "INVALID_CARD",
                 f"{key}: one line; with the image's folder it is {len(told[key])} characters, "
-                f"node.deploy takes {NODE_COMMAND_MOST}: shorten it, or start a script of the "
-                "folder",
+                f"node.deploy takes {most}"
+                + (" on Windows, where cmd starts a job with one line" if win else "")
+                + ": shorten it, or start a script of the folder",
             )
     return told
+
+
+def _on_windows(node: dict[str, Any] | None) -> bool:
+    """Whether the node runs Windows, as node.list says it (`machine.os`)."""
+    return str(obj(obj(node).get("machine")).get("os") or "") == "windows"
+
+
+def _long_dir(build: dict[str, Any], version: str, tenant: str | None) -> str:
+    """The image's folder as long as a node may name it, to check a command's length before
+    the build: a long home folder on Linux, the default build home on Windows."""
+    image = f"{build['image']}@{version}"
+    if build.get("os") == "windows":
+        org = tenant or f"t_{'x' * 30}"
+        return f"C:\\ProgramData\\AMSYOS\\Node\\builds\\{org}\\images\\{image}"
+    return f"/home/{'x' * 24}/amsyos-build/images/{image}"
 
 
 def node_line(node: dict[str, Any]) -> str:
@@ -1404,37 +1555,38 @@ def node_problems(
     card: dict[str, Any] | None,
     need: str = "build",
 ) -> list[str]:
-    """What keeps deploy from building on this node, each with what fixes it: online, a
-    Linux machine at `full` (node.exec), an admin calling, a GPU when the card needs one.
-    `need`: build; as_node (node.deploy as the node's own account: full, an admin); deploy
-    (node.deploy: managed); define (service.define only)."""
+    """What keeps deploy from building on this node, each with what fixes it: online, at
+    `full` (node.exec), an admin calling, a GPU when the card needs one (a Windows node
+    builds too: what it cannot make yet is `windows_problems`'). `need`: build; as_node
+    (node.deploy as the node's own account: full, an admin); deploy (node.deploy: managed);
+    define (service.define only)."""
     name = f"node {node.get('node')} '{node.get('name') or '?'}'"
     machine = obj(node.get("machine"))
     found: list[str] = []
     if node.get("state") != "online":
         seen = f" (last seen {node['last_seen']})" if node.get("last_seen") else ""
         found.append(f"{name} is offline{seen}: start it at that machine (amsyos-node run)")
-    if need == "build" and str(machine.get("os") or "") == "windows":
-        found.append(
-            f"{name} runs Windows: deploy builds on a Linux node only; on Windows, zip the "
-            "service yourself and node.deploy it (amsyos describe node.deploy)"
-        )
     level = node.get("access")
     what = (
         "builds there with node.exec"
         if need == "build"
         else "deploys there as the node's own account (its image's folder is closed to amsyos-job)"
     )
+    there = (
+        "in an administrator window there: amsyos-node access"
+        if str(machine.get("os") or "") == "windows"
+        else "there: sudo amsyos-node access"
+    )
     if need in {"build", "as_node"} and level != "full":
         found.append(
             f"{name} is at the level '{level or '?'}': deploy {what}, which needs 'full'. Only "
-            "the person at that machine raises it, there: sudo amsyos-node access full"
+            f"the person at that machine raises it, {there} full"
         )
     elif need == "deploy" and level not in {"managed", "full"}:
         found.append(
             f"{name} is at the level '{level or '?'}': deploy puts each service there with "
             "node.deploy, which needs 'managed' or 'full'. Only the person at that machine "
-            "raises it, there: sudo amsyos-node access managed"
+            f"raises it, {there} managed"
         )
     admin = you is None or you.get("kind") != "person" or you.get("admin")
     if need in {"build", "as_node"} and not admin:
@@ -1500,7 +1652,12 @@ async def who_calls(api: Api) -> tuple[str, dict[str, Any]]:
 
 def node_plan_lines(build: dict[str, Any], models_gb: float | None) -> list[str]:
     """What the build on the node puts in, in words."""
-    bits = [f"conda-forge {' '.join(build['conda'])}"]
+    windows = build.get("os") == "windows"
+    bits = (
+        [f"uv: Python {build['python']}, a virtual environment"]
+        if windows
+        else [f"conda-forge {' '.join(build['conda'])}"]
+    )
     packages: list[str] = build["packages"]
     if packages:
         bits.append(f"pip {' '.join(packages[:8])}" + (" …" if len(packages) > 8 else ""))
@@ -1516,11 +1673,20 @@ def node_plan_lines(build: dict[str, Any], models_gb: float | None) -> list[str]
         size = "" if models_gb is None else f", about {models_gb:.1f} GB"
         lines.append(f"     models: {len(models)}{size}, into the node's Hugging Face cache")
     if build.get("setup"):
-        lines.append(f"     setup: {short(str(build['setup']), 200)}")
-    lines.append(
-        "     under ~/amsyos-build of the node's account (AMSYOS_BUILD_HOME there moves it); an "
-        "environment made before for the same packages is taken as it is"
-    )
+        how = " (a cmd line, in the image's folder)" if windows else ""
+        lines.append(f"     setup{how}: {short(str(build['setup']), 200)}")
+    if windows:
+        lines.append(
+            "     under %ProgramData%\\AMSYOS\\Node\\builds\\<your organisation> of the node "
+            "(AMSYOS_BUILD_HOME of its account moves it), which amsyos-job may read and run, "
+            "never write; an environment made before for the same packages is taken as it "
+            "is; each job runs as amsyos-job through _node\\run.cmd"
+        )
+    else:
+        lines.append(
+            "     under ~/amsyos-build of the node's account (AMSYOS_BUILD_HOME there moves it); "
+            "an environment made before for the same packages is taken as it is"
+        )
     if build.get("needs_module"):
         lines.append(f"     the code imports amsyos: AMSYOS Node {NODE_MIN} or later gives it")
     return lines
@@ -2088,13 +2254,13 @@ def image_version(top: dict[str, Any], chosen: list[dict[str, Any]], made: dict[
 
 def _image_version_of(image_dir: str) -> str:
     """The version part of an image's folder on the node (images/<image>@<version>)."""
-    return Path(image_dir).name.partition("@")[2] or "0"
+    return re.split(r"[\\/]", image_dir)[-1].partition("@")[2] or "0"
 
 
-def code_print(root: Path, made: dict[str, Any]) -> str:
+def code_print(root: Path, made: dict[str, Any], *, windows: bool = False) -> str:
     """What an own node's image is built from: every file packed but the cards (a card that
-    changed alone needs no build), the kit deploy adds (`_node/`), the image's name and what
-    makes it (the top card's BUILD_KEYS)."""
+    changed alone needs no build), the kit deploy adds (`_node/`; a Windows node's own), the
+    image's name and what makes it (the top card's BUILD_KEYS)."""
     digest = hashlib.sha256()
     for row in made["files"]:
         rel = str(row["file"])
@@ -2104,8 +2270,11 @@ def code_print(root: Path, made: dict[str, Any]) -> str:
         runs = "x" if path.stat().st_mode & 0o111 else "-"
         digest.update(f"{rel}\0{runs}\0".encode())
         digest.update(hashlib.sha256(path.read_bytes()).digest())
-    for name in ("build.py", "run.sh", "fetch.py"):
+    kit = ("build.ps1", "run.cmd", "fetch.py") if windows else ("build.py", "run.sh", "fetch.py")
+    for name in kit:
         digest.update((NODE_KIT / name).read_bytes())
+    if windows:
+        digest.update(b"windows\0" + FETCH_CMD)
     top: dict[str, Any] = made["card"]
     keys = {k: _build_value(k, top.get(k)) for k in BUILD_KEYS}
     digest.update(json.dumps([cards.image_of(top), keys], sort_keys=True).encode())
@@ -2281,6 +2450,9 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
         chosen_node = await own_node(api, node)
     problems += await node_versions(api, tenant, top, chosen)
     node_id = str(chosen_node.get("node")) if chosen_node is not None else None
+    windows = _on_windows(chosen_node)
+    if windows:
+        made["code"] = code_print(root, made, windows=True)
     last = _read_node_state(root) if api is not None else {}
     build_now = plan_cards(last, made, node_id, chosen, force=force)
     if (
@@ -2299,13 +2471,15 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
     image_dir = "" if build_now else str(last.get("image_dir") or "")
     version = image_version(top, chosen, made) if build_now else _image_version_of(image_dir)
     gpu = bool(seq(obj((chosen_node or {}).get("machine")).get("gpus")))
-    build = node_build(root, made, version, gpu)
+    build = node_build(root, made, version, gpu, windows=windows, org=tenant)
+    if windows and build_now and todo:
+        problems += windows_problems(root, top["card"], build)
     package = node_package(root, made, build)
-    long_dir = f"/home/{'x' * 24}/amsyos-build/images/{build['image']}@{version}"
+    long_dir = _long_dir(build, version, tenant)
     for entry in todo:
         if entry["plan"] in {BUILD, DEPLOY}:
             try:
-                node_commands(entry["card"], long_dir if build_now else image_dir)
+                node_commands(entry["card"], long_dir if build_now else image_dir, windows=windows)
             except CliError as exc:
                 problems.append(_at(entry) + exc.hint)
     if api is not None and todo:
@@ -2316,7 +2490,7 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
     for entry in chosen:  # the image's folder is the node's to say
         entry["commands"] = {
             k: v.replace("IMAGE_DIR", there)
-            for k, v in node_commands(entry["card"], "IMAGE_DIR").items()
+            for k, v in node_commands(entry["card"], "IMAGE_DIR", windows=windows).items()
         }
     first = todo[0] if todo else chosen[0]
     answer["service"] = first.get("service", answer["service"])
@@ -2380,8 +2554,8 @@ async def dry_run_node(  # noqa: PLR0917 - the dry run's state, passed on
         lines += [_plan_line(e, chosen_node is not None) for e in chosen]
     if build_now:
         steps = [
-            f"  1. node.exec (an admin; the node at full), with the package as file1: {NODE_EXEC}; "
-            f"up to {NODE_EXEC_S // 60} min",
+            "  1. node.exec (an admin; the node at full), with the package as file1: "
+            f"{NODE_EXEC_WINDOWS if windows else NODE_EXEC}; up to {NODE_EXEC_S // 60} min",
             *node_plan_lines(build, models_gb),
         ]
         if multi:
@@ -2439,6 +2613,9 @@ async def deploy_node(
     tenant, you = await who_calls(api)
     chosen_node = await own_node(api, node)
     node_id = str(chosen_node.get("node"))
+    windows = _on_windows(chosen_node)
+    if windows:
+        made["code"] = code_print(root, made, windows=True)
     problems += await node_versions(api, tenant, top, chosen)
     last = _read_node_state(root)
     build_now = plan_cards(last, made, node_id, chosen, force=force)
@@ -2465,15 +2642,17 @@ async def deploy_node(
     image_dir = "" if build_now else str(last["image_dir"])
     version = image_version(top, chosen, made) if build_now else _image_version_of(image_dir)
     gpu = bool(seq(obj(chosen_node.get("machine")).get("gpus")))
-    build = node_build(root, made, version, gpu)
+    build = node_build(root, made, version, gpu, windows=windows, org=tenant)
+    if windows and build_now:
+        problems += windows_problems(root, top["card"], build)
     deploying = [e for e in todo if e["plan"] in {BUILD, DEPLOY}]
     package = node_package(root, made, build) if deploying else b""
     # A command too long for node.deploy is said before the build: the image's folder as a
     # long home folder would put it.
-    long_dir = f"/home/{'x' * 24}/amsyos-build/images/{build['image']}@{version}"
+    long_dir = _long_dir(build, version, tenant)
     for entry in deploying:
         try:
-            node_commands(entry["card"], long_dir if build_now else image_dir)
+            node_commands(entry["card"], long_dir if build_now else image_dir, windows=windows)
         except CliError as exc:
             problems.append(_at(entry) + exc.hint)
     # AMSYOS's check of every card, before anything is uploaded or built (free).
@@ -2535,7 +2714,7 @@ async def deploy_node(
     began = time.monotonic()
     if build_now:
         made_on_node, lines = await _node_exec(
-            api, out, creds, node_id, asset, answer, str(build["env"])
+            api, out, creds, node_id, asset, answer, str(build["env"]), windows=windows
         )
         if made_on_node is None:
             out.emit(answer, *lines)
@@ -2555,7 +2734,7 @@ async def deploy_node(
     for e in todo:
         try:
             if e["plan"] in {BUILD, DEPLOY}:
-                commands = node_commands(e["card"], image_dir)
+                commands = node_commands(e["card"], image_dir, windows=windows)
                 e["deployed"] = await _node_deploy(api, out, node_id, e["service"], asset,
                                                    commands, built)  # fmt: skip
                 e["commands"] = commands
@@ -2718,15 +2897,20 @@ async def _node_exec(  # noqa: PLR0917 - the deploy's state, passed on
     asset: str,
     answer: dict[str, Any],
     env: str,
+    *,
+    windows: bool = False,
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    """The build on the node (node.exec of `_node/build.py`), followed to its end: what it
-    made (`out/build.json`), or None and the lines that say why not. `cache_env` names the
-    environment it builds: the kernel hands the build its organisation's cached copies
-    (the environment, and the image by the package) and where to keep what it makes."""
+    """The build on the node (node.exec of `_node/build.py`, on Windows `_node\\build.ps1`),
+    followed to its end: what it made (`out/build.json`), or None and the lines that say why
+    not. `cache_env` names the environment it builds: the kernel hands the build its
+    organisation's cached copies (the environment, and the image by the package) and where
+    to keep what it makes. A Windows build uses no build cache yet: no `cache_env`."""
     params: dict[str, Any] = {
-        "node": node_id, "command": NODE_EXEC, "timeout_s": NODE_EXEC_S, "file1": asset,
-        "outputs": "build", "cache_env": env,
+        "node": node_id, "command": NODE_EXEC_WINDOWS if windows else NODE_EXEC,
+        "timeout_s": NODE_EXEC_S, "file1": asset, "outputs": "build",
     }  # fmt: skip
+    if not windows:
+        params["cache_env"] = env
     began = time.monotonic()
     started = await api.run(
         "node.exec", params, key=idempotency_key("node.exec", params, creds), wait_s=50
@@ -2785,10 +2969,13 @@ async def _node_deploy(  # noqa: PLR0917 - the deploy's state, passed on
     """node.deploy of the package with the card's command (and serve), waited for until the
     node has unpacked it. Its jobs run as the node's own account (`as_node`, the node at
     full and an admin, as node.exec was) only when the build's folder is closed to the job
-    account amsyos-job (deploy_node says it once)."""
+    account amsyos-job (deploy_node says it once). On Windows they run as amsyos-job, which
+    the build home lets read and run it, even where the node's as_node_default is on."""
     params: dict[str, Any] = {"node": node_id, "service": service_id, "package": asset, **commands}
     if built.get("closed_at"):
         params["as_node"] = True
+    elif _windows_dir(str(built.get("image_dir") or "")):
+        params["as_node"] = False  # TODO(review): isolation — the account the jobs run as
     try:
         told = await api.instant("node.deploy", params)
     except CliError as exc:

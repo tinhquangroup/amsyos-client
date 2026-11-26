@@ -8,6 +8,7 @@
  *   const { job } = require("amsyos");      // ESM: import { job } from "amsyos";
  *
  *   const text = job.params.text;            // the request's params, defaults filled in
+ *   const plan = job.json("plan");           // a JSON input, parsed (text or file)
  *   const picture = job.input("image");      // an input file's path, or null
  *   job.inputName("image");                  // the name it was uploaded with, or null
  *   job.service, job.serviceVersion;         // which service the job is for, or null
@@ -29,6 +30,10 @@
  * Each job is a line on stdin and its end a line on stdout (what `serve` reads and
  * writes); what the handler prints goes to stderr, the job's log. `job.fail` ends only
  * the job; an error thrown by the handler fails the job, and the server goes on.
+ *
+ * A structured input is one JSON input with a schema in the card (sdk/CONTRACT.md §7):
+ * `job.json(name)` gives its value parsed, whether the call gave JSON text or a JSON file;
+ * AMSYOS has checked it against the schema before the job started.
  *
  * Only Node's own modules; found through NODE_PATH on every job.
  */
@@ -79,6 +84,30 @@ class Job {
   input(name) {
     const rel = (this.told.inputs || {})[name];
     return rel ? path.join(this.folder, rel) : null;
+  }
+
+  /** The value of the JSON input `name`, parsed: the JSON file given for it, or its JSON
+   * text (a param). AMSYOS has already checked it against the input's schema when the card
+   * gives one. null when the call gave neither; a value that is not JSON fails the job with
+   * a hint the caller can act on (INVALID_PARAMS). */
+  json(name) {
+    const file = this.input(name);
+    if (file !== null) {
+      const text = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+      try {
+        return JSON.parse(text);
+      } catch (err) {
+        this.fail(`${name}: the file is not JSON (${clip(err)}); give a JSON file`);
+      }
+    }
+    const value = this.params[name];
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string") return value; // JSON already (a local run's example)
+    try {
+      return JSON.parse(value);
+    } catch (err) {
+      this.fail(`${name}: not JSON text (${clip(err)}); give it as JSON, like {"key": 1}`);
+    }
   }
 
   /** The name the file of the input `name` was uploaded with ("chair v3.glb"), or null
@@ -173,6 +202,11 @@ function serviceOf(told) {
   }
   const text = (x) => (typeof x === "string" && x ? x : null);
   return [text(id), text(version)];
+}
+
+function clip(err, most = 120) {
+  const said = String((err && err.message) || err);
+  return said.length <= most ? said : said.slice(0, most - 1) + "…";
 }
 
 /** One line to the machine on fd 1, whole (a pipe Node made non-blocking may say EAGAIN). */

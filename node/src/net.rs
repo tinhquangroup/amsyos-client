@@ -3,7 +3,7 @@
 //! The node talks to the Gateway the person typed and to nothing else: every link a job
 //! message carries must be of the same origin.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Seek, SeekFrom};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,10 @@ const MEASURE_GAP: Duration = Duration::from_secs(60);
 /// may be lost; the Gateway takes a job's end once).
 const AWAY_FOR: Duration = Duration::from_secs(600);
 const ENDS_KEPT: usize = 64;
+/// Node 2.1.9 (a customer, 2026-11-26: an admin's command waited 48 minutes behind a
+/// collection on a node of 1 slot): a node.exec takes no slot and holds no job back; at most
+/// this many run at once (the kernel counts the same, kernel/nodes.py `MOST_EXECS`).
+const MOST_EXECS: usize = 2;
 
 pub fn tls() -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
@@ -167,8 +171,14 @@ pub async fn join(code: &str, gateway: &str, server: bool, name: Option<String>)
     cfg.org = org.clone();
     cfg.kind = kind_told.clone();
     cfg.name = Some(name);
+    // Node 2.1.9: a node joined from now on updates itself, unless its person turned it off.
+    let auto_update = *cfg.auto_update.get_or_insert(true);
     cfg.save(&dir)?;
     println!("joined: node {node} of {org}, a {kind_told}");
+    println!(
+        "auto-update: {} (an administrator here changes it: amsyos-node auto-update on|off)",
+        if auto_update { "on: new versions signed by AMSYOS, from this Gateway, applied when no job runs" } else { "off" }
+    );
     println!("next: switch a service on (amsyos-node enable …), then: amsyos-node run");
     Ok(())
 }
@@ -204,6 +214,8 @@ struct Ctx {
     slots: u32,
     out: mpsc::UnboundedSender<String>,
     running: Mutex<HashMap<String, watch::Sender<bool>>>,
+    /// Node 2.1.9: which of `running` are node.exec commands (`MOST_EXECS`, beside the slots).
+    execs: Mutex<HashSet<String>>,
     /// The level and services the last hello or beat said.
     said: Mutex<String>,
     /// Node 2.1.2: the servers kept warm.
@@ -285,6 +297,8 @@ impl Ctx {
             "access": access.as_str(),
             "as_node_default": default,
             "folders": folders,
+            "version": env!("CARGO_PKG_VERSION"),
+            "auto_update": Config::load(&self.node_dir).auto_update == Some(true),
         });
         match v {
             Value::Object(m) => m,
@@ -405,6 +419,7 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
         slots,
         out: tx,
         running: Mutex::new(HashMap::new()),
+        execs: Mutex::new(HashSet::new()),
         said: Mutex::new(String::new()),
         pool: serve::Pool::new(slots.max(2) as usize, machine.ram_gb),
         builds: Arc::new(RwLock::new(())),
@@ -431,14 +446,22 @@ pub async fn run(allow_elevated: bool) -> Result<i32, String> {
     });
     tokio::spawn(serve::reap(ctx.pool.clone(), ctx.node_dir.clone(), stop.clone()));
     tokio::spawn(watch_disk(ctx.clone(), stop.clone()));
+    // Node 2.1.9: new versions (update.rs), applied and restarted into only while no job runs
+    // (`running` holds node.exec's too, and every job a warm server does).
+    let busy = ctx.clone();
+    tokio::spawn(crate::update::keep_up(
+        ctx.node_dir.clone(), ctx.gateway.clone(), move || busy.running_ids().is_empty(), ctx.pool.clone(), stop.clone(),
+    ));
 
     let mut backoff = 1u64;
     let mut pending: Option<String> = None;
+    std::thread::spawn(watch_stuck);
     loop {
         let end = tokio::select! {
             end = session(&ctx, &key, &cfg.node, &ws, &machine, &mut rx, &mut pending) => end,
             _ = stop.changed() => break,
         };
+        turned(false);
         let pause = match end {
             End::Replaced => {
                 warn!("a newer connection of this node took over (4409): this one stops");
@@ -494,6 +517,52 @@ fn same_program() -> bool {
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+// A customer, 2026-11-26 (node 2.1.12): two nodes' connections stood still for 2 h 45 min,
+// nothing going either way, and their own "nothing heard" check never ran because it lives
+// in the loop that stood still. Now every send has a deadline, and a thread of its own, not
+// the async runtime, watches that the connection loop keeps turning: when it has not moved
+// for `STUCK_S` the program exits with `STUCK_EXIT`, and what started it (the Windows task,
+// RestartCount 999 every minute; a container's restart policy) starts it again.
+const SEND_WAIT: Duration = Duration::from_secs(30);
+const STUCK_S: u64 = 150;
+const STUCK_EXIT: i32 = 75;
+/// When the connection loop last turned (seconds since the epoch), 0 while not connected.
+static TURNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn epoch_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn turned(connected: bool) {
+    TURNED.store(if connected { epoch_s().max(1) } else { 0 }, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The watch on the connection loop, on a thread of its own (see `STUCK_S`).
+fn watch_stuck() {
+    loop {
+        std::thread::sleep(Duration::from_secs(10));
+        let at = TURNED.load(std::sync::atomic::Ordering::SeqCst);
+        if at == 0 {
+            continue;
+        }
+        let still = epoch_s().saturating_sub(at);
+        if still > STUCK_S {
+            warn!("the connection loop has not moved for {still} s: the program exits ({STUCK_EXIT}) so that what started it starts it again");
+            std::thread::sleep(Duration::from_millis(500)); // the line reaches node.log
+            std::process::exit(STUCK_EXIT);
+        }
+    }
+}
+
+/// A message sent within `SEND_WAIT`, or why not.
+async fn send_within(ws: &mut Ws, m: Message) -> Result<(), String> {
+    match tokio::time::timeout(SEND_WAIT, ws.send(m)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("a send did not finish in {} s", SEND_WAIT.as_secs())),
+    }
+}
+
 /// The next text message as JSON; Err(close code) when the connection ends.
 async fn next_json(ws: &mut Ws) -> Result<Value, Option<u16>> {
     loop {
@@ -546,7 +615,7 @@ async fn session(
     hello.insert("node".into(), node.into());
     hello.insert("sig".into(), util::b64url(&sig.to_bytes()).into());
     hello.insert("machine".into(), serde_json::to_value(&fresh).unwrap_or(Value::Null));
-    if let Err(e) = ws.send(Message::text(Value::Object(hello).to_string())).await {
+    if let Err(e) = send_within(&mut ws, Message::text(Value::Object(hello).to_string())).await {
         return End::Lost(format!("cannot say hello: {e}"), false);
     }
 
@@ -579,14 +648,14 @@ async fn session(
     };
 
     if let Some(m) = pending.take() {
-        if let Err(e) = ws.send(Message::text(m.clone())).await {
+        if let Err(e) = send_within(&mut ws, Message::text(m.clone())).await {
             *pending = Some(m);
             return End::Lost(format!("cannot send: {e}"), true);
         }
     }
     // Node 2.1.8: the jobs that ended lately, said again (the Gateway takes an end once).
     for m in ctx.ends_now() {
-        if let Err(e) = ws.send(Message::text(m)).await {
+        if let Err(e) = send_within(&mut ws, Message::text(m)).await {
             return End::Lost(format!("cannot send: {e}"), true);
         }
     }
@@ -595,6 +664,7 @@ async fn session(
     let mut look = tokio::time::interval(Duration::from_secs(2));
     let mut heard = Instant::now();
     loop {
+        turned(true);
         tokio::select! {
             _ = look.tick() => {
                 // A beat at once when the level, the default or the services changed
@@ -610,7 +680,7 @@ async fn session(
                         info!("the default as_node: {}", if default { "on" } else { "off" });
                     }
                     let b = Value::Object(ctx.activity("beat")).to_string();
-                    if let Err(e) = ws.send(Message::text(b)).await {
+                    if let Err(e) = send_within(&mut ws, Message::text(b)).await {
                         return End::Lost(format!("cannot beat: {e}"), true);
                     }
                 }
@@ -620,7 +690,10 @@ async fn session(
                 match msg {
                     Some(Ok(Message::Text(t))) => handle(ctx, t.as_str()),
                     Some(Ok(Message::Ping(_))) => {
-                        let _ = ws.flush().await; // the pong tungstenite queued goes now
+                        // The pong tungstenite queued goes now.
+                        if tokio::time::timeout(SEND_WAIT, ws.flush()).await.is_err() {
+                            return End::Lost("a pong did not go in time".into(), true);
+                        }
                     }
                     Some(Ok(Message::Close(frame))) => return closed(frame.map(|f| u16::from(f.code)), true),
                     Some(Ok(_)) => {}
@@ -629,7 +702,7 @@ async fn session(
                 }
             }
             Some(out) = rx.recv() => {
-                if let Err(e) = ws.send(Message::text(out.clone())).await {
+                if let Err(e) = send_within(&mut ws, Message::text(out.clone())).await {
                     *pending = Some(out);
                     return End::Lost(format!("cannot send: {e}"), true);
                 }
@@ -639,10 +712,12 @@ async fn session(
                     return End::Lost("nothing heard from the Gateway for too long".into(), true);
                 }
                 let b = Value::Object(ctx.activity("beat")).to_string();
-                if let Err(e) = ws.send(Message::text(b)).await {
+                if let Err(e) = send_within(&mut ws, Message::text(b)).await {
                     return End::Lost(format!("cannot beat: {e}"), true);
                 }
-                let _ = ws.send(Message::Ping(Default::default())).await;
+                if let Err(e) = send_within(&mut ws, Message::Ping(Default::default())).await {
+                    return End::Lost(format!("cannot ping: {e}"), true);
+                }
             }
         }
     }
@@ -675,7 +750,15 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
         ctx.send(Value::Object(ctx.state(id, "running")));
         return;
     }
+    if crate::update::restarting() {
+        ctx.refuse(id, "the node restarts into a new version of its program: back within a minute");
+        return;
+    }
     let service = v.get("service").and_then(Value::as_str).unwrap_or("").to_string();
+    if crate::update::draining() && service != "node.exec" {
+        ctx.refuse(id, "the node lets its running jobs end, then restarts into a new version of its program: back within minutes");
+        return;
+    }
     let direct = v.get("direct").and_then(Value::as_bool).unwrap_or(false);
     let cfg = Config::load(&ctx.node_dir);
     let access = cfg.access();
@@ -841,8 +924,16 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
         ));
         return;
     }
-    let busy = ctx.running.lock().map(|r| r.len()).unwrap_or(0);
-    if busy as u32 >= ctx.slots {
+    // Node 2.1.9: a command counts only against the commands (MOST_EXECS), a job only against
+    // the slots. `running` says what runs, `execs` which of it are commands.
+    let ids = ctx.running_ids();
+    let execs = ctx.execs.lock().map(|e| ids.iter().filter(|i| e.contains(*i)).count()).unwrap_or(0);
+    if exec.is_some() && execs >= MOST_EXECS {
+        ctx.refuse(id, &format!("{execs} node.exec commands run already (at most {MOST_EXECS} at once, beside the jobs)"));
+        return;
+    }
+    let busy = ids.len() - execs;
+    if exec.is_none() && busy as u32 >= ctx.slots {
         ctx.refuse(id, &format!("no free slot ({busy} of {} running)", ctx.slots));
         return;
     }
@@ -855,6 +946,11 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
     let (tx, rx) = watch::channel(false);
     if let Ok(mut r) = ctx.running.lock() {
         r.insert(id.to_string(), tx);
+    }
+    if exec.is_some() {
+        if let Ok(mut e) = ctx.execs.lock() {
+            e.insert(id.to_string());
+        }
     }
     if exec.is_none() {
         if let Ok(mut u) = ctx.using.lock() {
@@ -880,6 +976,9 @@ fn take_job(ctx: &Arc<Ctx>, v: &Value) {
         ctx.send_end(msg);
         if let Ok(mut r) = ctx.running.lock() {
             r.remove(&id);
+        }
+        if let Ok(mut e) = ctx.execs.lock() {
+            e.remove(&id);
         }
         if let Ok(mut u) = ctx.using.lock() {
             u.remove(&id);

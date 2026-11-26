@@ -91,9 +91,11 @@ from amsyos_cli.later import add_parsers as add_later
 from amsyos_cli.login import host_of, login
 from amsyos_cli.overview import overview, session_show
 from amsyos_cli.pool import cmd_pool, cmd_restore, cmd_uninstall
+from amsyos_cli.schema import add_parser as add_schema
 from amsyos_cli.secret import add_parsers as add_secret
 from amsyos_cli.shell import cli_hint, quoted
 from amsyos_cli.space import cmd_node
+from amsyos_cli.splitting import add_parsers as add_split
 from amsyos_cli.trying import TRY_HELP, cmd_try
 from amsyos_cli.watch import cmd_watch
 from amsyos_cli.work import cmd_promote, cmd_work
@@ -272,22 +274,33 @@ def _read_as_json(items: list[str], params: dict[str, Any]) -> dict[str, str]:
     return {k: t for k, t in texts.items() if k in params and not isinstance(params[k], str)}
 
 
+def takes_json(told: dict[str, Any], name: str) -> bool:
+    """Does `describe` say the input takes the JSON itself: its `input_schema` anyOf a JSON
+    text or file and the JSON (a text or file input with a schema, the owner, 2026-11-26)?"""
+    prop = obj(obj(obj(told.get("input_schema")).get("properties")).get(name))
+    return any(obj(o).get("contentMediaType") == standards.JSON for o in seq(prop.get("anyOf")))
+
+
 async def _as_declared(
     api: Api, service: str, params: dict[str, Any], *, texts: dict[str, str],
     local: dict[str, Path],
 ) -> None:  # fmt: skip
     """A customer, 2026-11-23: `end=5.5` went as a number to an input that takes text, and was
-    refused. A `k=v` read as JSON goes as its text where `describe` says the input takes text;
-    a `k=@path` of an input that takes no file goes as the file's text, and leaves `local`
-    (one describe, only when such a `k=v` or a `k=@path` is given); whatever describe cannot
-    say leaves the value as it was read, a `k=@path` as a file to upload."""
+    refused. A `k=v` read as JSON goes as its text where `describe` says the input takes text,
+    except an object or a list for an input that takes the JSON itself (`takes_json`), which
+    goes as JSON; a `k=@path` of an input that takes no file goes as the file's text, and
+    leaves `local` (one describe, only when such a `k=v` or a `k=@path` is given); whatever
+    describe cannot say leaves the value as it was read, a `k=@path` as a file to upload."""
     if not texts and not local:
         return
     try:
-        inputs = obj((await api.describe(service)).get("inputs"))
+        told = await api.describe(service)
     except CliError:
         return
+    inputs = obj(told.get("inputs"))
     for key, text in texts.items():
+        if isinstance(params[key], dict | list) and takes_json(told, key):
+            continue
         if obj(inputs.get(key)).get("type") in ("str", "enum"):
             params[key] = text
     for key in [k for k in local if k in inputs]:
@@ -807,6 +820,46 @@ def _as_arg(key: str, value: Any) -> str:
     return quoted(f"{key}={text}")
 
 
+def _json_of(told: dict[str, Any], name: str, value: Any) -> Any:
+    """An example's JSON text of an input that takes the JSON itself, as that JSON: the run
+    line reads `plan={"a":1}`, not the same JSON quoted as text."""
+    if not isinstance(value, str) or not takes_json(told, name):
+        return value
+    try:
+        found: Any = json.loads(value)
+    except ValueError:
+        return value
+    return cast("Any", found) if isinstance(found, dict | list) else value
+
+
+def _shape_text(sketch: Any) -> str:
+    """A part of a JSON input's shape on one line: [a|b], {k: int, k?: str}."""
+    if isinstance(sketch, dict):
+        pairs = cast("dict[str, Any]", sketch)
+        return "{" + ", ".join(f"{k}: {_shape_text(v)}" for k, v in pairs.items()) + "}"
+    if isinstance(sketch, list):
+        return "[" + ", ".join(_shape_text(v) for v in cast("list[Any]", sketch)) + "]"
+    return str(sketch)
+
+
+def shape_lines(sketch: Any, pad: str) -> list[str]:
+    """A JSON input's shape, as `describe`'s `shapes.inputs.<name>` sketches it (kernel/
+    schemas.py `shape`: `key?` may be left out, an enum a|b, a list [its items]): a key a
+    line, an object in it indented under its key."""
+    if not isinstance(sketch, dict):
+        return [f"{pad}{_shape_text(sketch)}"]
+    lines: list[str] = []
+    for key, value in cast("dict[str, Any]", sketch).items():
+        items = cast("list[Any]", value) if isinstance(value, list) else []
+        if isinstance(value, dict) and value:
+            lines += [f"{pad}{key}:", *shape_lines(value, pad + "  ")]
+        elif len(items) == 1 and isinstance(items[0], dict) and items[0]:
+            lines += [f"{pad}{key}: a list of", *shape_lines(items[0], pad + "  ")]
+        else:
+            lines.append(f"{pad}{key}: {_shape_text(value)}")
+    return lines
+
+
 FILLER_MOST = 60  # an input's own example longer than this is no part of a run line
 
 
@@ -837,7 +890,10 @@ def run_line(told: dict[str, Any]) -> str:
     example = obj(told.get("example"))
     if example:
         service = str(example.get("service_id") or service)
-        args = [_as_arg(str(k), v) for k, v in obj(example.get("params")).items()]
+        args = [
+            _as_arg(str(k), _json_of(told, str(k), v))
+            for k, v in obj(example.get("params")).items()
+        ]
     else:
         inputs = {str(k): obj(v) or {"type": v} for k, v in obj(told.get("inputs")).items()}
         named = [k for k, spec in inputs.items() if spec.get("required")]
@@ -927,11 +983,22 @@ async def cmd_describe(args: argparse.Namespace, out: Out) -> int:
     if told.get("cannot_run"):
         lines.append(f"  cannot run: {told['cannot_run']}")
     inputs = obj(told.get("inputs"))
+    shaped = obj(obj(told.get("shapes")).get("inputs"))
     if inputs:
         lines.append("inputs:")
     for name, given in inputs.items():
         spec = obj(given) or {"type": given}
         bits = [str(spec.get("type"))]
+        sketch = shaped.get(name)
+        if sketch is not None:  # the owner, 2026-11-26: its shape, not `plan: str`
+            json_is = (
+                "a JSON object" if isinstance(sketch, dict)
+                else "a JSON list" if isinstance(sketch, list) else "JSON"
+            )  # fmt: skip
+            bits = [
+                f"{json_is} (or its text)" if spec.get("type") == "str"
+                else f"{json_is} (or an asset:// of it)"
+            ]  # fmt: skip
         means: Any = spec.get("means")
         if means:
             bits.append(f"({', '.join(map(str, seq(means))) or means})")
@@ -947,6 +1014,12 @@ async def cmd_describe(args: argparse.Namespace, out: Out) -> int:
         lines.append(f"  {name}: {' '.join(bits)}")
         if spec.get("description"):
             lines.append(f"      {short(str(spec['description']), 300)}")
+        if sketch is not None:
+            lines += shape_lines(sketch, "      ")
+            lines.append(
+                f"      (key? may be left out; the whole schema: amsyos describe "
+                f"{told.get('id')} --json, input_schema.properties.{name})"
+            )
         if spec.get("example") is not None:
             example = spec["example"]
             text = example if isinstance(example, str) else json.dumps(example, ensure_ascii=False)
@@ -1121,6 +1194,7 @@ async def cmd_init(args: argparse.Namespace, out: Out) -> int:
         lines += [f"  {n}" for n in notes]
         answer["proposed"] = card
         answer["notes"] = notes
+        card = cards.load(root)  # as card --check reads it: schemas/ files in their place
     left = cards.left_to_fill(card)
     try:
         creds: Credentials | None = credentials()
@@ -1197,6 +1271,7 @@ async def _check_card(
     if problems and not shown:
         lines.append("  problem: the same as found here, above")
     lines += [f"  advice: {short(a, 300)}" for a in seq(told.get("advice"))]
+    lines += [f"  warning: {short(w, 500)}" for w in seq(told.get("warnings"))]
     lines += [
         f"  note (not a problem): example.{name}: {path} is not in the workspace yet: deploy "
         f"uploads it, then checks it (amsyos files put {shlex.quote(path)} has AMSYOS check "
@@ -2086,6 +2161,8 @@ def parser() -> Parser:
     top.commands.update(add_later(add, common))  # checks set for later (2026-11-25)
     top.commands.update(add_secret(add, common))  # secrets kept out of the context (2026-11-25)
     top.commands.update(add_ask(add, common))  # requests across organisations (2026-11-25)
+    top.commands.update(add_split(add, common))  # one job as many chunks (2026-11-26)
+    add_schema(add)  # a structured input's JSON Schema, into the card (2026-11-26)
 
     p = add(
         "self-update", cmd_self_update,

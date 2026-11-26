@@ -7,6 +7,7 @@ service need not know its layout:
     from amsyos import job
 
     text = job.params["text"]                      # the request's params
+    plan = job.json("plan")                        # a JSON input, parsed (text or file)
     picture = job.input("image")                   # an input file, or None
     job.input_name("image")                        # the name it was uploaded with, or None
     job.service, job.service_version               # which service the job is for
@@ -34,6 +35,12 @@ Each job is a line on stdin and its end a line on stdout (what `serve` reads and
 writes): what the handler prints goes to stderr, the job's log. `job.fail` ends only the
 job; an exception in the handler fails the job with its last line, and the server goes
 on.
+
+A structured input is one JSON input with a schema in the card (sdk/CONTRACT.md §7):
+`job.json(name)` gives its value parsed, whether the call gave JSON text or a JSON file.
+AMSYOS has checked it against the schema before the job started; load it straight into
+your own types (`Plan.model_validate(job.json("plan"))`), the model the schema was made
+from (`amsyos schema plan --from-model main.py:Plan`).
 
 Only the standard library; it is on the PYTHONPATH of every job. The same surface for
 Node is `require("amsyos")` (sdk/node), and for any other language the command
@@ -97,6 +104,25 @@ class Job:
         """The file given for the input `name`, or None when none was."""
         rel = self.told.get("inputs", {}).get(name)
         return self.folder / rel if rel else None
+
+    def json(self, name: str) -> Any:
+        """The value of the JSON input `name`, parsed: the JSON file given for it, or its
+        JSON text (a param). AMSYOS has already checked it against the input's schema when
+        the card gives one. None when the call gave neither; a value that is not JSON fails
+        the job with a hint the caller can act on (INVALID_PARAMS)."""
+        path = self.input(name)
+        if path is not None:
+            try:
+                return json.loads(path.read_bytes())  # UTF-8, a BOM too
+            except ValueError as exc:  # not JSON, or not text
+                self.fail(f"{name}: the file is not JSON ({_clip(exc)}); give a JSON file")
+        value = self.params.get(name)
+        if not isinstance(value, str):
+            return value  # None, or JSON already (a local run's example)
+        try:
+            return json.loads(value)
+        except ValueError as exc:
+            self.fail(f'{name}: not JSON text ({_clip(exc)}); give it as JSON, like {{"key": 1}}')
 
     def input_name(self, name: str) -> str | None:
         """The name the file of the input `name` was uploaded with ("chair v3.glb"; the
@@ -184,6 +210,11 @@ def _service_of(told: dict[str, Any]) -> tuple[str | None, str | None]:
         ident if isinstance(ident, str) and ident else None,
         version if isinstance(version, str) and version else None,
     )
+
+
+def _clip(exc: Exception, most: int = 120) -> str:
+    said = str(exc)
+    return said if len(said) <= most else said[: most - 1] + "…"
 
 
 def _own_tmp(tmp: Path) -> None:

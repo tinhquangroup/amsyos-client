@@ -13,8 +13,8 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
 - Find a service: `amsyos discover "<words>"` (any language; English works best; none: where to
   start; `--need need.json`: plans with a quote): AMSYOS's platform services, your organisation's
   own and those offered to it. `amsyos describe <service>`: its inputs, examples, a `run` line.
-- Run one: `amsyos run <service> k=v ... --wait` (a local file as `k=@path`, sent only when the
-  workspace lacks it). Outputs land in `./out/<job>/` (names and sizes printed, no contents or links).
+- Run one: `amsyos run <service> k=v ... --wait` (a local file as `k=@path`, sent only if the workspace lacks it);
+  outputs in `./out/<job>/` (names, sizes; no contents or links). Frames, files, rows over your nodes: `amsyos split`.
 - A long job: `amsyos wait <job>` (a person's approval too; `--timeout s`), `status`, `result`, `logs
   [-f]`, `cancel`; never poll. `work show|resume <job>`: a recipe's steps, rerun what failed. A local
   command over a minute: `amsyos bg start -- <cmd>`; a check due later: `amsyos later add "<what>" --in 2h`.
@@ -26,6 +26,7 @@ services and those offered to it, and this project's memory: `amsyos` (`--help`,
   <version>`; `contract <gp_...|service|need>`: what a build must meet; `pool`: runs, cost, disk; `compare <id>`:
   two versions measured; `uninstall <id|family.*> [--yes]`, `restore`; `node list|show|rent [--hours h] [--gpu
   none]|extend|close|exec <node> "<cmd>"|--script x.ps1`. Patch: `result <job> --apply`, `git apply --3way`.
+- A structured input is one JSON input with a schema: `amsyos schema <input> --from-model f.py:Model|--from-example`.
 - Beside others: read `around:` lines before you act on shared things; `amsyos around`, `status
   "<doing>"`, `note.post|list`, `lease.take what=<x>`|`release`, `watch --note|--free|--handover`. Need
   another machine or organisation: `amsyos ask <t_x|w_x> "<what>"`; answer: `amsyos reply <rq_…> "<text>"`.

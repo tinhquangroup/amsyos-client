@@ -33,14 +33,58 @@ amsyos-node try <service id> --params '<json>' --input <name>=<file> [--folder <
 amsyos-node run                                    online; Ctrl+C stops it
 amsyos-node info | services | disable <id> | job …
 amsyos-node diag [<folder>]                        Windows: why a job does not start as amsyos-job
+amsyos-node profiles                               2.1.9: the nodes (profiles) of this account here
+amsyos-node --profile <name> <command> …           2.1.9: the same, on a second node beside the first
+amsyos-node profile adopt <name> <folder>          2.1.9: a node folder made by hand becomes a profile
 ```
 
-**A new version of the program:** stop the node (its scheduled task, or Ctrl+C), run the new
-file's `setup` again in an administrator window with the same `--jobs` (and `--services`) as
-before (it copies the program into `%ProgramFiles%\AMSYOS\Node` and sets the folders' ACLs
-again), then start the node again. Join, services, the level and its default are kept. On
-Linux, run `sudo amsyos-node setup` again the same way: it copies `amsyos-job` and the Python
-job module that every job uses (`run` warns while they are not this version's).
+**One computer, several organisations (2.1.9).** A node is one organisation's. For a second
+organisation on the same computer, join a second node beside the first as a *profile*:
+
+```
+amsyos-node --profile acme setup [--jobs D:\AMSYOS\acme\jobs] [--services D:\AMSYOS\acme\services]
+amsyos-node --profile acme join <code> --gateway https://<host>
+```
+
+Every command takes `--profile <name>` (or `AMSYOS_NODE_PROFILE`): its own node folder
+(`%LOCALAPPDATA%\AMSYOS\Node-acme`, `~/.local/share/amsyos-node-acme`) with its own key,
+config, services and logs, and by default its own jobs and managed services folders
+(`%ProgramData%\AMSYOS\Node\jobs-acme`, `…\services-acme`). Without one, nothing moves.
+On Windows each profile runs from a scheduled task of its own, "AMSYOS Node acme", running
+`amsyos-node.exe --profile acme run --allow-elevated`; `setup` and `join` print the
+PowerShell line that makes it (at the user's logon, highest rights, no time limit).
+`amsyos-node profiles` lists them. `setup` writes the job account's renewed password into every
+node folder of the user, so running it for one profile never stops another's jobs. The
+profiles share the program, the account it runs as and `amsyos-job`: at `full` an
+organisation's admins reach the other nodes too (`join` and `access full` warn). Keep profiles
+for organisations that trust each other.
+
+A node made by hand before 2.1.9 (another `LOCALAPPDATA` for a second process) becomes a
+profile with `amsyos-node profile adopt <name> <its node folder>`, with that node stopped: the
+folder moves to `Node-<name>` with its key, and the jobs and services folders its config.json
+names stay; then replace its old task with the line `adopt` prints.
+
+**A new version of the program (2.1.9: by itself).** `amsyos-node auto-update on|off` (an
+administrator at the machine; on for a node joined since 2.1.9, off for one joined before),
+`amsyos-node update [--check]` (now) and `amsyos-node rollback` (back to the program before).
+With auto-update on, the node asks its own Gateway at its start and every 6 hours. It takes only
+a newer version signed with AMSYOS's release key (built into the program), of the size and
+SHA-256 signed, that answers `version`. It puts the release in place while it runs no job (a
+`node.exec` counts). Windows: the program in `%ProgramFiles%\AMSYOS\Node` and `amsyos-job.exe`,
+the old ones kept as `…prev.exe`. Linux: the installed program when the node's account may
+write it, else a verified copy in the node's folder that `run` execs into. Then every node
+process on the machine restarts itself once it runs no job. On Windows a one-shot scheduled task
+ends and starts the task that runs it. `node.log` says each step (sdk/NODE.md §7). The release:
+`node/build.sh`, then `uv run python scripts/node_release.py <version>`, which signs it and
+writes `dist/node/`, served at `/node/release/`.
+
+By hand, as before: stop the node (its scheduled task, or Ctrl+C; every profile's), run the new file's
+`setup` again in an administrator window (it copies the program into `%ProgramFiles%\AMSYOS\Node`
+and sets the folders' ACLs again; since 2.1.9 it keeps the `--jobs` and `--services` folders
+config.json names), then start the node again. Join, services, the level and its default are
+kept. On Linux, run `sudo amsyos-node setup` again the same way: it copies `amsyos-job` and the
+Python job module that every job uses (`run` warns while they are not this version's; a
+self-update on Linux cannot replace root's `amsyos-job`).
 
 **Python jobs (2.1.2).** Every job's PYTHONPATH holds the module `amsyos` (`from amsyos import
 job, serve`, the same as on a rented node), written by `setup` in `bin/python`. A PYTHONPATH the
@@ -76,7 +120,7 @@ node is online and still has it (src/net.rs, sdk/NODE.md §5).
 `--allow-elevated` (a Windows with UAC off has no other kind). Each job runs as `amsyos-job`
 in a folder of its own, held by a Job Object (Windows) or rlimits and cgroups (Linux); the
 node keeps its key, `config.json`, `services.json` and `node.log` in
-`%LOCALAPPDATA%\AMSYOS\Node` or `~/.local/share/amsyos-node`.
+`%LOCALAPPDATA%\AMSYOS\Node` or `~/.local/share/amsyos-node` (a profile's: `…-<name>`).
 
 **The default `as_node` (2.0.2).** On a machine kept for the organisation's own agents, an
 administrator there may make the node's own account the default: `amsyos-node access full

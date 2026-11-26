@@ -19,6 +19,11 @@ overwrites it.
   `amsyos init --dir services/<name>` proposes the card from the code there, `amsyos card
   --check --dir services/<name>` checks it (free), `amsyos deploy --dir services/<name>`
   builds it on the rented node (`where: node` in the card: on an own node, free).
+- A structured input (a plan, a scene, options with keys of their own) is one JSON input with
+  a schema: `amsyos schema <input> --from-model main.py:Plan --dir services/<name>` (or
+  `--from-example`) writes `schemas/<input>.json`, and the code reads it with
+  `job.json("<input>")`. A client then calls right the first time, and a wrong value is
+  refused in seconds, before a machine starts.
 - The organisation's code runs only on its nodes, never on this machine; `amsyos run
   --local` may try a small piece here when it needs nothing rented.
 - `log.md`: what was built and done (below). `out/<job>/`: outputs, never committed.

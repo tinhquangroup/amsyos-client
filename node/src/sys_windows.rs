@@ -1002,6 +1002,28 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
         return Err("cannot tell who runs this (USERNAME is not set)".into());
     }
 
+    // Node 2.1.9: the folders config.json names are kept when not given here; a profile's
+    // defaults are its own (`jobs-<name>`, `services-<name>`), and no two profiles share one.
+    let dir = config::node_dir();
+    let was = Config::load(&dir);
+    let jobs = jobs.or_else(|| was.jobs.clone());
+    let services = services.or_else(|| was.services_root.clone());
+    let root = jobs.clone().unwrap_or_else(config::default_jobs_root);
+    if !root.is_absolute() {
+        return Err("--jobs: an absolute path such as D:\\AMSYOS\\jobs".into());
+    }
+    let managed = services.clone().unwrap_or_else(config::default_services_root);
+    if !managed.is_absolute() {
+        return Err("--services: an absolute path such as D:\\AMSYOS\\services".into());
+    }
+    if let Some(why) = config::clash(
+        &config::node_base(),
+        config::profile(),
+        &[(&root, "the jobs folder"), (&managed, "the managed services folder")],
+    ) {
+        return Err(why);
+    }
+
     // The account and its password.
     let password = new_password();
     let mut name = wide(JOB_USER);
@@ -1028,12 +1050,31 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     if r != 0 {
         return Err(format!("cannot make the account {JOB_USER} (NetUserAdd/NetUserSetInfo error {r})"));
     }
-    let dir = config::node_dir();
     config::ensure_node_dir(&dir)?;
     let blob = protect(password.as_bytes())?;
     drop(password);
     util::write_file(&dir.join(PASSWORD_FILE), &blob, true).map_err(|e| e.to_string())?;
     println!("account {JOB_USER}: {}; its password is kept for {me} only (DPAPI)", if made { "made" } else { "password renewed" });
+    // TODO(review): isolation — Node 2.1.9: every profile's node starts its jobs as the same
+    // amsyos-job, so its new password goes into every node folder of this user (the default's
+    // and each `Node-<name>`), or the other profiles' jobs could not start any more.
+    let mut also = Vec::new();
+    for (p, d) in config::node_dirs() {
+        if p.as_deref() == config::profile() {
+            continue;
+        }
+        let label = config::profile_label(p.as_deref());
+        match util::write_file(&d.join(PASSWORD_FILE), &blob, true) {
+            Ok(()) => also.push(label),
+            Err(e) => eprintln!(
+                "warning: {}: {e}: the jobs of profile {label} cannot start as {JOB_USER} until setup writes it",
+                d.join(PASSWORD_FILE).display()
+            ),
+        }
+    }
+    if !also.is_empty() {
+        println!("  written into the node folders of profile {} too (one job account for every node here)", also.join(", "));
+    }
 
     let reg = system_root().join(r"System32\reg.exe");
     hidden(
@@ -1057,16 +1098,8 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     // installed in a folder Users and the job account cannot write to: run from D:\ or a
     // download folder, a job could replace it or drop a DLL beside it.
     let base = config::program_data();
-    let root = jobs.clone().unwrap_or_else(config::default_jobs_root);
-    if !root.is_absolute() {
-        return Err("--jobs: an absolute path such as D:\\AMSYOS\\jobs".into());
-    }
     let bin = config::bin_dir();
     let install = config::install_dir();
-    let managed = services.clone().unwrap_or_else(config::default_services_root);
-    if !managed.is_absolute() {
-        return Err("--services: an absolute path such as D:\\AMSYOS\\services".into());
-    }
     for d in [&base, &root, &bin, &install, &managed] {
         std::fs::create_dir_all(d).map_err(|e| format!("cannot make {}: {e}", d.display()))?;
     }
@@ -1105,8 +1138,12 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     cfg.services_root = services;
     cfg.save(&dir)?;
     println!("installed: {} (SYSTEM, Administrators and {me} only)", installed.display());
-    println!("done. Run the node from there, and point a scheduled task there too:");
-    println!("  \"{}\" run --allow-elevated   (--allow-elevated only where UAC is off)", installed.display());
+    // Node 2.1.9: the scheduled task of this profile's node, run from there (no .cmd, no
+    // LOCALAPPDATA of its own: `--profile` names its folders).
+    let task = config::task_name(config::profile());
+    println!("done. Run the node from there, by the scheduled task \"{task}\"; this line makes it (or makes it again):");
+    println!("  {}", config::task_line(config::profile(), &installed, &me));
+    println!("  then: schtasks /run /tn \"{task}\"   (stop it: schtasks /end /tn \"{task}\")");
     Ok(())
 }
 

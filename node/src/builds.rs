@@ -4,13 +4,18 @@
 //! `amsyos deploy` (the CLI's nodekit/build.py, run by `node.exec` as this account) builds
 //! under `AMSYOS_BUILD_HOME` (by default `~/amsyos-build`): `images/<image>@<version>/`, whose
 //! `_node/where.env` names its environment `envs/<key>`, and each deployment's command (and
-//! serve) is `sh _node/run.sh <image folder> '<command>'`. After an undeploy, after a deploy
+//! serve) is `sh _node/run.sh <image folder> '<command>'`. Node 2.1.9, Windows: nodekit/build.ps1
+//! builds with uv under `AMSYOS_BUILD_HOME`, by default `%ProgramData%\AMSYOS\Node\builds\<org>`
+//! (`home`), with the same `images\` and `envs\` (a virtual environment holds `.ready`), and a
+//! deployment's line is `call _node\run.cmd "<image folder>" && <command>`, split as cmd does.
+//! After an undeploy, after a deploy
 //! and at the node's start the node removes the image folders that no deployment's command or
 //! serve names (nor a job running now), then the environments that no remaining image folder
 //! names. It never removes:
 //! - one younger than an hour (by its last change: a build not deployed yet);
 //! - anything while a `node.exec` runs (the caller holds the lock: a build in progress);
-//! - `hf/`, `fetched/`, `mamba/` (the package cache) or `tools/`;
+//! - `hf/`, `fetched/`, `mamba/` (the package cache) or `tools/`, nor on Windows `python\` and
+//!   `cache\` (the Pythons and the cache of uv);
 //! - a folder not as build.py makes it (an image holds `_node/where.env`, an environment
 //!   `conda-meta/` or `.ready`), or a link (only real folders; std's `remove_dir_all` removes
 //!   a link inside without following it);
@@ -30,18 +35,35 @@ pub const MIN_AGE: Duration = Duration::from_secs(3600);
 /// At most this many entries are looked at in one walk (a size is then a floor).
 const MOST_ENTRIES: usize = 300_000;
 const RUN_SH: &str = "_node/run.sh";
+/// Node 2.1.9: the wrapper of a deployment `amsyos deploy` built on a Windows node.
+const RUN_CMD: &str = "_node/run.cmd";
 const GB: f64 = (1u64 << 30) as f64;
 
-/// The build home, as `amsyos deploy` makes it with this account's environment:
-/// `AMSYOS_BUILD_HOME`, else `~/amsyos-build`. None on Windows (builds are Linux only).
+/// TODO(review): isolation — the build home, as `amsyos deploy` makes it with this account's
+/// environment: `AMSYOS_BUILD_HOME`, else `~/amsyos-build` on Linux and, node 2.1.9,
+/// `%ProgramData%\AMSYOS\Node\builds\<org>` on Windows: the organisation of this node's
+/// config.json, one home per organisation and never shared between two (build.ps1 makes it for
+/// the organisation that called node.exec, which can only be this node's own). None when it is
+/// not known (a Windows node not joined).
 pub fn home() -> Option<PathBuf> {
-    if cfg!(windows) {
-        return None;
-    }
     if let Some(h) = std::env::var_os("AMSYOS_BUILD_HOME").filter(|h| !h.is_empty()) {
         return Some(PathBuf::from(h));
     }
-    std::env::var_os("HOME").filter(|h| !h.is_empty()).map(|h| PathBuf::from(h).join("amsyos-build"))
+    #[cfg(windows)]
+    {
+        let org = crate::config::Config::load(&crate::config::node_dir()).org;
+        plain_org(&org).then(|| crate::config::program_data().join("builds").join(org))
+    }
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME").filter(|h| !h.is_empty()).map(|h| PathBuf::from(h).join("amsyos-build"))
+    }
+}
+
+/// An organisation's id as a folder's name: letters, digits, `_` and `-` only.
+#[cfg_attr(unix, allow(dead_code))]
+fn plain_org(org: &str) -> bool {
+    !org.is_empty() && org.len() <= 64 && org.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 pub fn gb(bytes: u64) -> f64 {
@@ -96,17 +118,62 @@ pub fn words(line: &str) -> Vec<String> {
     out
 }
 
-/// The image folders command lines name: the word after `…_node/run.sh`, and any word (or
-/// part of one between `; & | ( ) < >`) that is a path inside `<home>/images/`.
+/// Node 2.1.9: the words of a command line as cmd splits them (Windows): double quotes group
+/// and are dropped, `^` outside them takes the next character as it is; nothing is expanded.
+pub fn cmd_words(line: &str) -> Vec<String> {
+    let (mut out, mut cur, mut has, mut quoted) = (Vec::new(), String::new(), false, false);
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                has = true;
+                quoted = !quoted;
+            }
+            '^' if !quoted => {
+                has = true;
+                cur.extend(chars.next());
+            }
+            c if c.is_whitespace() && !quoted => {
+                if has {
+                    out.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            c => {
+                has = true;
+                cur.push(c);
+            }
+        }
+    }
+    if has {
+        out.push(cur);
+    }
+    out
+}
+
+/// A word that names the run wrapper of a build: `…_node/run.sh`, or `…_node\run.cmd`.
+fn is_wrapper(word: &str) -> bool {
+    let word = word.replace('\\', "/");
+    [RUN_SH, RUN_CMD].iter().any(|w| word == *w || word.ends_with(&format!("/{w}")))
+}
+
+/// The image folders command lines name: the word after `…_node/run.sh` (Windows:
+/// `…_node\run.cmd`), and any word (or part of one between `; & | ( ) < >`) that is a path
+/// inside `<home>/images/`. A line is split as the shell that runs it does: `sh`, cmd on
+/// Windows.
 pub fn named_images(lines: &[String], home: Option<&Path>) -> BTreeSet<PathBuf> {
+    named_images_as(lines, home, cfg!(windows))
+}
+
+fn named_images_as(lines: &[String], home: Option<&Path>, cmd: bool) -> BTreeSet<PathBuf> {
     let images = home.map(|h| h.join("images"));
     let mut found = BTreeSet::new();
     for line in lines {
-        let w = words(line);
+        let w = if cmd { cmd_words(line) } else { words(line) };
         for (i, word) in w.iter().enumerate() {
-            if word == RUN_SH || word.ends_with(&format!("/{RUN_SH}")) {
-                if let Some(next) = w.get(i + 1).filter(|n| n.starts_with('/')) {
-                    found.insert(PathBuf::from(next.trim_end_matches('/')));
+            if is_wrapper(word) {
+                if let Some(next) = w.get(i + 1).filter(|n| n.starts_with('/') || Path::new(n.as_str()).is_absolute()) {
+                    found.insert(PathBuf::from(next.trim_end_matches(['/', '\\'])));
                 }
             }
             let Some(images) = &images else { continue };
@@ -152,7 +219,8 @@ fn env_of(image: &Path) -> Option<String> {
     }
     let text = std::fs::read_to_string(path).ok()?;
     let value = text.lines().find_map(|l| l.strip_prefix("ENV_DIR="))?;
-    let dir = PathBuf::from(words(value).into_iter().next()?);
+    // Windows (build.ps1): the path as it is, as cmd's `for /f` in run.cmd reads it.
+    let dir = if cfg!(windows) { PathBuf::from(value.trim().trim_matches('"')) } else { PathBuf::from(words(value).into_iter().next()?) };
     dir.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
@@ -235,9 +303,94 @@ fn closed_to_others(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn closed_to_others(_dir: &Path) -> Result<(), String> {
-    Err("builds are cleaned on Linux only".into())
+/// TODO(review): isolation — node 2.1.9, Windows: a real folder (no junction or link) whose
+/// owner, and every ACL entry that lets an account write in it or in what inherits from it,
+/// is SYSTEM, Administrators or this account: never the job account, nor anyone else.
+/// build.ps1 gives a build home exactly SYSTEM, Administrators and the node's user full and
+/// `amsyos-job` read and run. A NULL DACL (anyone may do anything) or an entry of a kind not
+/// read here refuses it.
+#[cfg(windows)]
+fn closed_to_others(dir: &Path) -> Result<(), String> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetAce, GetFileSecurityW, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation,
+        IsWellKnownSid, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    const REPARSE_POINT: u32 = 0x400;
+    const ALLOWED: u8 = 0; // ACCESS_ALLOWED_ACE_TYPE
+    const DENIED: u8 = 1; // ACCESS_DENIED_ACE_TYPE
+    // Write data or add a file, append or add a folder, write extended attributes, delete a
+    // child, write attributes, delete, change the ACL or the owner, generic all, generic write.
+    const WRITES: u32 = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
+    let shown = dir.display();
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("{shown}: {e}"))?;
+    if !meta.file_type().is_dir() || meta.file_attributes() & REPARSE_POINT != 0 {
+        return Err(format!("{shown} is not a folder"));
+    }
+    // This account's SID (its token's user); `me` holds it while it is compared.
+    let mut me = vec![0u64; 64];
+    let mut token: HANDLE = null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err("cannot read this account's token".into());
+    }
+    let mut len = 0u32;
+    let got = unsafe { GetTokenInformation(token, TokenUser, me.as_mut_ptr() as *mut c_void, 512, &mut len) };
+    unsafe { CloseHandle(token) };
+    if got == 0 {
+        return Err("cannot read this account's SID".into());
+    }
+    let my_sid = unsafe { (*(me.as_ptr() as *const TOKEN_USER)).User.Sid };
+    let trusted = |sid: PSID| unsafe {
+        IsWellKnownSid(sid, WinLocalSystemSid) != 0 || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0 || EqualSid(sid, my_sid) != 0
+    };
+    let path: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let asked = DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION;
+    let mut need = 0u32;
+    unsafe { GetFileSecurityW(path.as_ptr(), asked, null_mut(), 0, &mut need) };
+    if need == 0 || need > 1 << 20 {
+        return Err(format!("cannot read the ACL of {shown}"));
+    }
+    let mut sd = vec![0u64; (need as usize).div_ceil(8)];
+    if unsafe { GetFileSecurityW(path.as_ptr(), asked, sd.as_mut_ptr() as *mut c_void, need, &mut need) } == 0 {
+        return Err(format!("cannot read the ACL of {shown}"));
+    }
+    let (mut owner, mut defaulted): (PSID, i32) = (null_mut(), 0);
+    let owned = unsafe { GetSecurityDescriptorOwner(sd.as_mut_ptr() as *mut c_void, &mut owner, &mut defaulted) };
+    if owned == 0 || owner.is_null() || !trusted(owner) {
+        return Err(format!("{shown} is owned by another account"));
+    }
+    let (mut present, mut dacl): (i32, *mut ACL) = (0, null_mut());
+    if unsafe { GetSecurityDescriptorDacl(sd.as_mut_ptr() as *mut c_void, &mut present, &mut dacl, &mut defaulted) } == 0 {
+        return Err(format!("cannot read the ACL of {shown}"));
+    }
+    if present == 0 || dacl.is_null() {
+        return Err(format!("any account may write in {shown} (it has no ACL)"));
+    }
+    for i in 0..u32::from(unsafe { (*dacl).AceCount }) {
+        let mut ace: *mut c_void = null_mut();
+        if unsafe { GetAce(dacl, i, &mut ace) } == 0 || ace.is_null() {
+            return Err(format!("cannot read the ACL of {shown}"));
+        }
+        match unsafe { (*(ace as *const ACE_HEADER)).AceType } {
+            DENIED => continue,
+            ALLOWED => {
+                let allowed = ace as *const ACCESS_ALLOWED_ACE;
+                let mask = unsafe { (*allowed).Mask };
+                let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as PSID;
+                if mask & WRITES != 0 && !trusted(sid) {
+                    return Err(format!("another account may write in {shown}"));
+                }
+            }
+            _ => return Err(format!("{shown} has an ACL entry this node does not read")),
+        }
+    }
+    Ok(())
 }
 
 /// The image folders of the home and the environments: those named (kept), the rest.
@@ -421,6 +574,21 @@ mod tests {
     fn words_as_sh_splits_them() {
         assert_eq!(words("sh _node/run.sh /a/images/x@1 'python main.py'"), ["sh", "_node/run.sh", "/a/images/x@1", "python main.py"]);
         assert_eq!(words(r#"sh _node/run.sh '/a b/images/x@1' "it's" 'a'"'"'b'"#), ["sh", "_node/run.sh", "/a b/images/x@1", "it's", "a'b"]);
+    }
+
+    #[test]
+    fn words_as_cmd_splits_them_and_the_image_is_found() {
+        let line = r#"call _node\run.cmd "C:\ProgramData\AMSYOS\Node\builds\t_x\images\thumb@1.0.0" && python main.py --n "a b""#;
+        assert_eq!(
+            cmd_words(line),
+            ["call", r"_node\run.cmd", r"C:\ProgramData\AMSYOS\Node\builds\t_x\images\thumb@1.0.0", "&&", "python", "main.py", "--n", "a b"]
+        );
+        assert_eq!(cmd_words(r#"a^&b "x y"z"#), ["a&b", "x yz"]);
+        // The word after the wrapper when it is an absolute path (one Linux reads as such here).
+        let found = named_images_as(&[r#"call _node\run.cmd "/b/images/thumb@1.0.0" && python main.py"#.to_string()], None, true);
+        assert_eq!(found.into_iter().collect::<Vec<_>>(), [PathBuf::from("/b/images/thumb@1.0.0")]);
+        assert!(named_images_as(&[r"call _node\run.cmd relative\x && y".to_string()], None, true).is_empty());
+        assert!(is_wrapper("/srv/x/_node/run.sh") && is_wrapper(r"D:\s\_node\run.cmd") && !is_wrapper("run.cmd"));
     }
 
     #[test]

@@ -558,6 +558,27 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     if util::which("sudo").is_none() && !Path::new("/usr/bin/sudo").exists() {
         return Err("sudo is not installed: install it (e.g. `apt install sudo`), then run setup again".into());
     }
+    // Node 2.1.9: the folders config.json names are kept when not given here; a profile's
+    // defaults are its own (`jobs-<name>`, `services-<name>`), and no two profiles share one.
+    let dir = config::node_dir_in(&home);
+    let was = Config::load(&dir);
+    let jobs = jobs.or_else(|| was.jobs.clone());
+    let services = services.or_else(|| was.services_root.clone());
+    let root = jobs.clone().unwrap_or_else(config::default_jobs_root);
+    if !root.is_absolute() {
+        return Err("--jobs: an absolute path".into());
+    }
+    let managed = services.clone().unwrap_or_else(config::default_services_root);
+    if !managed.is_absolute() {
+        return Err("--services: an absolute path".into());
+    }
+    if let Some(why) = config::clash(
+        &config::node_base_in(&home),
+        config::profile(),
+        &[(&root, "the jobs folder"), (&managed, "the managed services folder")],
+    ) {
+        return Err(why);
+    }
 
     // The account: no login shell, no home.
     if sh("getent", &["group", JOB_USER]).is_err() {
@@ -574,10 +595,6 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     println!("account {JOB_USER}: ready; {user} is in its group");
 
     // The jobs folder: the node's user owns it, the job account may only enter it.
-    let root = jobs.clone().unwrap_or_else(config::default_jobs_root);
-    if !root.is_absolute() {
-        return Err("--jobs: an absolute path".into());
-    }
     std::fs::create_dir_all(&root).map_err(|e| format!("cannot make {}: {e}", root.display()))?;
     let root_s = root.to_string_lossy().into_owned();
     sh("chown", &[&format!("{user}:{JOB_USER}"), &root_s])?;
@@ -586,10 +603,6 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
 
     // TODO(review): isolation — the managed services folder (`deploy`): the node's user owns
     // it, mode 0755: the job account may read and run what is in it, never write.
-    let managed = services.clone().unwrap_or_else(config::default_services_root);
-    if !managed.is_absolute() {
-        return Err("--services: an absolute path".into());
-    }
     std::fs::create_dir_all(&managed).map_err(|e| format!("cannot make {}: {e}", managed.display()))?;
     sh("chown", &[&format!("{user}:"), &managed.to_string_lossy()])?;
     std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
@@ -634,7 +647,6 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     println!("{SUDOERS}: {user} may run {} as {JOB_USER}", target.display());
 
     // The node's own folder, where `run` finds the jobs folder chosen here.
-    let dir = config::node_dir_in(&home);
     let mut created = Vec::new();
     let mut at = dir.clone();
     while !at.exists() {
@@ -656,6 +668,7 @@ pub fn setup(user: Option<String>, jobs: Option<PathBuf>, services: Option<PathB
     }
     println!("{}: the node's folder", dir.display());
     println!("done. {user} must log in again (a new session) so that the group {JOB_USER} applies.");
+    println!("then, as {user}: {} run", config::command());
     Ok(())
 }
 

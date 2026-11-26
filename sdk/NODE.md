@@ -1,4 +1,4 @@
-# AMSYOS Node, protocol 1 (node 2.1.8)
+# AMSYOS Node, protocol 1 (node 2.1.9)
 
 How the node program (`node/`, Rust) and the Gateway talk (spec v2 §26). The kernel's side is
 `kernel/nodes.py` (models, table, join codes), `gateway/node.py` (routes) and
@@ -9,7 +9,7 @@ allowed, read in place (§6, spec v3 §8.3); a 2.0 node says none, and gets no s
 Node 2.1.4 plans with the memory its cgroup allows and says when a job ran out of it (§4).
 Node 2.1.5 removes a deployment from afar (`undeploy`, §5), frees the builds no deployment uses
 and says what each deployment holds of the disk (`disk`, §2 and §4). Node 2.1.6 sends the log
-it kept of a job when the kernel asks (`log`, §5); 2.1.7 keeps job logs 7 days (§5 `log`).
+it kept of a job when the kernel asks (`log`, §5); 2.1.7 keeps job logs 7 days (§5 `log`). 2.1.9: profiles (§4), Windows builds (§4), node.exec beside the slots (§5), self-update (§7).
 Node 2.1.8 rides out a restart of AMSYOS: its jobs go on and are recorded as they ended (§2
 "When the connection drops", §3). A node that runs this program is of type `own` (spec v3 §17); a rented node, a machine
 AMSYOS rents for the organisation, does not run it.
@@ -64,7 +64,13 @@ jitter).
    4401 (unknown node or bad signature: join again), 4403 (the node was removed: join
    again), 4409 (a newer connection of the same node took over: stop this one).
 4. Node → every 30 s: `{"t": "beat", "services": [...], "running": [...], "slots": 1,
-   "idle_s": 412, "load": 0.12}`. A node unheard for 90 s is offline.
+   "idle_s": 412, "load": 0.12}`. A node unheard for 90 s is offline. A connection stuck
+   open with nothing going (a customer, 2026-11-26: 2 h 45 min, the TCP kept alive by a proxy)
+   is ended from both sides: the Gateway closes a connection whose node has not beaten for
+   120 s; the node (2.1.12) gives every send 30 s, reconnects when it has heard nothing for
+   three beats, and, when its connection loop itself has not turned for 150 s, exits with
+   code 75 so that what started it (the Windows task: RestartCount 999, every minute; a
+   container's restart policy) starts it again.
    - `services`: the service ids switched on at the machine (§4). The kernel places a job of
      a service only on a node that lists it.
    - `slots`: how many jobs it runs at once (a workstation 1, a server about half its CPUs;
@@ -231,9 +237,13 @@ The links are signed by the kernel for this job and this node only, and expire.
   `mamba/` (the package cache, which environments hard-link from) and `tools/` stay. Only real
   folders, never a link, removed without following any link inside; nothing at all when the
   home, `images/` or `envs/` is not the node's account's or another account may write there
-  (group write only for that account's own primary group, never `amsyos-job`'s). Linux only. A
+  (group write only for that account's own primary group, never `amsyos-job`'s). A
   deploy whose command names an image folder that is no longer there is refused: deploy again
-  with a build (`amsyos deploy --force`).
+  with a build (`amsyos deploy --force`). Windows (2.1.9): the build is `_node\build.ps1` with
+  uv, the home by default `%ProgramData%\AMSYOS\Node\builds\<org>` (its config.json's
+  organisation; also `python\`, `cache\` and `tmp\` stay), whose ACL lets only SYSTEM,
+  Administrators and the node's user write (owner and entries checked) and `amsyos-job` read
+  and run; a line is `call _node\run.cmd "<image folder>" && <command>`, split as cmd does.
 - **A server kept warm (2.1.2; contract 1 §3).** A service switched on with `enable … --serve
   "<command line>"`, or deployed with `serve` (§5), beside or instead of its command:
   - the node starts the server, in the service's folder, for a job, and keeps it for the next
@@ -286,7 +296,34 @@ The links are signed by the kernel for this job and this node only, and expire.
 - **Where things are.** Windows: the node's folder `%LOCALAPPDATA%\AMSYOS\Node` (key,
   `config.json`, `services.json`, logs), jobs under `%ProgramData%\AMSYOS\Node\jobs` (no
   access for other users), `amsyos-job.exe` under `%ProgramData%\AMSYOS\Node\bin`. Linux:
-  `~/.local/share/amsyos-node`, jobs under `/var/lib/amsyos-node/jobs`.
+  `~/.local/share/amsyos-node`, jobs under `/var/lib/amsyos-node/jobs`. The jobs and managed
+  services folders `setup --jobs`/`--services` chose are in `config.json`; `setup` keeps them
+  when run again without those options (node 2.1.9).
+- **Profiles: one computer, several organisations (node 2.1.9).** A node row stays one
+  organisation's; a computer serves another organisation through a second node beside the
+  first, a *profile*: `amsyos-node --profile <name> <command> …` (or `AMSYOS_NODE_PROFILE`;
+  the name `[a-z0-9_-]`, at most 32, starting with a letter or a digit). Each profile has its
+  own node folder (`%LOCALAPPDATA%\AMSYOS\Node-<name>`, `~/.local/share/amsyos-node-<name>`)
+  with its own key, `config.json`, `services.json` and logs, and by default its own jobs and
+  managed services folders (`%ProgramData%\AMSYOS\Node\jobs-<name>` and `…\services-<name>`,
+  `/var/lib/amsyos-node/jobs-<name>` and `…/services-<name>`); `setup` refuses a folder that is,
+  holds or lies in another profile's node, jobs or services folder, and `enable` and `allow`
+  refuse one that holds (or lies in) another profile's. Without a profile every path is what
+  it was. `join --profile <name>` joins a second node (a new key); `amsyos-node profiles`
+  lists the profiles here (node, organisation, joined or not, folders, scheduled task). On
+  Windows each profile's node runs from its own scheduled task, "AMSYOS Node <name>" (the
+  default's: "AMSYOS Node"), `amsyos-node.exe --profile <name> run --allow-elevated`, whose
+  line `setup` and `join` print. The profiles share the program, `bin` and the job account:
+  `setup` writes the job account's new password (DPAPI) into every node folder of the user
+  it runs as, so renewing it never stops another profile's jobs. On Linux a profile's node
+  also keeps its builds apart: `AMSYOS_BUILD_HOME` is `~/amsyos-build-<name>` unless the
+  account sets it. `amsyos-node profile adopt <name> <folder>` turns a node folder made by
+  hand (a node run with another `LOCALAPPDATA` or `HOME`) into the profile: the folder is
+  moved (a rename, the same drive) with its key, and the jobs and services folders its
+  `config.json` names are kept. What profiles do not separate: the jobs of every profile run
+  as the same `amsyos-job`, and every node as the same account, so at `full` (§5) one
+  organisation's admins reach the other nodes' keys and files; `join` and `access full` warn
+  when that is so. Profiles fit organisations that trust each other (one owner's).
 
 ## 5. Access levels (spec v2 §26; additions to protocol 1)
 
@@ -418,6 +455,9 @@ It comes as a `job` message with `"service": "node.exec"` and an `exec` part:
 ```
 
 - **Refused** (`refused`) unless the node is at `full`.
+- **No slot (2.1.9):** it runs beside the jobs: it takes none of `slots`, a job is not refused
+  while it runs, and at most 2 run at once (a third is refused; the kernel sends no third). An
+  older node counts it against `slots`, and the kernel does too.
 - **How it runs:** as the node's own account, `cmd.exe /d /s /c` on Windows, `sh -c` on Linux.
   It runs in `cwd`, or in the job's folder when `cwd` is null. `$AMSYOS_JOB` names the job's
   folder, and the inputs are in `in/` as for any job. It is killed at `max_runtime_s` with its
@@ -508,3 +548,87 @@ of the copy, bounded above. Nothing of the folder goes through AMSYOS; only the 
 are put, as for any job.
 
 `amsyos-node try <service> --folder <input>=<name>/<path>` reads one the same way.
+
+## 7. Self-update (node 2.1.9)
+
+**The release.** AMSYOS's operator builds the program (`node/build.sh`) and runs
+`scripts/node_release.py <version>`; the Gateway then serves, with no token:
+
+```
+GET {gateway}/node/release/latest.json
+{"version": "2.1.9", "files": {
+  "windows-x86_64": {"file": "amsyos-node-2.1.9.exe", "sha256": "<hex>", "size": N, "sig": "<base64url>"},
+  "linux-x86_64": {"file": "amsyos-node-2.1.9-linux-x86_64", "sha256": "<hex>", "size": N, "sig": "<base64url>"}}}
+GET|HEAD {gateway}/node/release/<file>     the program, by exactly that name
+```
+
+`sig` is an Ed25519 signature of the UTF-8 bytes `amsyos-node <version> <platform> <sha256 hex>`
+by AMSYOS's release key. Its public half is built into the program (`RELEASE_KEY`,
+`node/src/update.rs`); the private half never leaves the operator. The node trusts no Gateway
+for what it runs. It takes a release only when all of these hold:
+- it comes from the Gateway the node joined (the address is made from `config.json`'s
+  `gateway`; no redirect is followed);
+- its version is `x.y.z` and newer than the program's: never the same, never older;
+- the file has exactly the name above, at most 100 MB, and its size and SHA-256 are the signed
+  ones;
+- the signature checks out against the built-in key;
+- the downloaded program, run once with `version`, answers `amsyos-node <version> …`.
+
+**At the machine.**
+
+```
+amsyos-node auto-update [on|off]   an administrator (an elevated window; sudo), never from afar
+amsyos-node update [--check]       the newest release now
+amsyos-node rollback               back to the program before the last update
+```
+
+`join` turns auto-update on when `config.json` does not say it (`"auto_update"`), so it is on
+for a node joined since 2.1.9 and off for one joined before. A `full` node's admin may run
+these through `node.exec`, as any command. With auto-update on, the running node asks for
+`latest.json` 30 to 150 s after it starts and then every 6 hours (±30 minutes). It downloads a
+newer release into its own folder (`update/`), checks it as above, and applies it only while it
+runs no job. A `node.exec` counts as a job, and so does any job a warm server does. A version
+rolled back from is held back (`update.json`'s `held`) until a newer one comes;
+`amsyos-node update` takes it all the same. Every step goes to `node.log`. `hello` and `beat`
+also say `"version"` and `"auto_update"` (the kernel ignores both for now).
+
+**What is replaced.**
+- **Windows:** the program `%ProgramFiles%\AMSYOS\Node\amsyos-node.exe` and the job wrapper
+  `%ProgramData%\AMSYOS\Node\bin\amsyos-job.exe`. `setup` gave the node's user both folders. A
+  running program cannot be overwritten but can be renamed, so each is replaced in four steps:
+  the new copy is written beside it, its SHA-256 checked again, the old one renamed `…prev.exe`
+  (kept for `rollback`) and the copy renamed in its place. Profiles share the program, so it
+  is replaced once for the machine, under `%ProgramData%\AMSYOS\Node\update.lock`. What was
+  applied and what is held back are kept beside it in `update.json`.
+- **Linux:** when the node's account may write the installed program (and its folder), it is
+  replaced the same way (`amsyos-node.prev`); the job wrapper too, if the account may write it.
+  Otherwise (the usual case: root's `/usr/local/bin/amsyos-node`, as in a container with no
+  systemd), the verified copy stays in the node's own folder (`update/`, with `staged.json`).
+  `run` checks it again at every start: the signature, this machine's platform, a plain file
+  (not a link) of the node's account writable by it alone, the size and the SHA-256. When it is
+  newer than the installed program, `run` execs into it (the same PID). The installed
+  `amsyos-job` then keeps its version until `sudo amsyos-node setup` of the new program; `run`
+  warns of it, as it does after any new program.
+
+**The restart.** Every node process on the machine (each profile) watches the files that decide
+what it runs: the installed program, and on Linux `staged.json`. When they change (its own
+update, another profile's, `amsyos-node update` or `rollback`), it restarts itself once it runs
+no job. It never ends another process's job. While it closes, a job sent to it is `refused`, and
+the kernel places that job again.
+- **Windows:** a one-shot scheduled task "AMSYOS Node (restart <pid>)" of the node's user
+  (elevated only when the node is) runs a PowerShell script written in the node's own folder. It
+  finds the running task whose process is this node (or the .cmd that started it) by the process
+  id, ends that task and starts it again, then deletes itself. The task runs outside the node's
+  own job object, which would otherwise end with the node. A node that no scheduled task runs
+  starts the new program itself with its own arguments and exits.
+- **Linux:** the node execs the installed program again with its own arguments (the same PID).
+  That program's start takes the copy an update kept.
+
+`amsyos-node update` run through `node.exec` is a child of the node it updates: it only puts the
+files in place and returns. The exec then ends, and the node, idle once its exec is done,
+restarts itself.
+
+- **Drain (2.1.11).** A new program that has waited 30 minutes for a moment with no job makes the
+  node refuse new jobs (`node.exec` still runs; the kernel places a refused job again) until the
+  running ones end; then it restarts into it. A node whose jobs run back to back is so never left
+  on an old program.

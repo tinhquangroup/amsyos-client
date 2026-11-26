@@ -20,6 +20,7 @@ mod mem;
 mod net;
 mod pymod;
 mod serve;
+mod update;
 mod util;
 
 #[cfg(unix)]
@@ -37,16 +38,30 @@ use serde_json::Value;
 use config::{Access, Config, Service, Services};
 
 const USAGE: &str = "\
-AMSYOS Node 2.1.7: this computer runs its organisation's services. Nothing dials into it.
+AMSYOS Node 2.1.9: this computer runs its organisation's services. Nothing dials into it.
 
+  amsyos-node [--profile <name>] <command> …
+        one computer, several organisations: each profile is a node of its own, for one
+        organisation (its own folder, key, config, jobs and managed services folders; on
+        Windows its own scheduled task \"AMSYOS Node <name>\"). The name: a-z, 0-9, - and _,
+        at most 32; AMSYOS_NODE_PROFILE does the same. Without one: the default node
   amsyos-node setup [--user <name>] [--jobs <folder>] [--services <folder>]
         once, as an administrator (Windows) or root (Linux: sudo), and again after each new
         version: the job account amsyos-job, the jobs folder (--jobs), the managed services
         folder (--services), their permissions, and what every job finds (amsyos-job, the
-        Python module `amsyos` on its PYTHONPATH);
-        on Windows it also installs the program in %ProgramFiles%\\AMSYOS\\Node: run it from there
+        Python module `amsyos` on its PYTHONPATH); the folders config.json names are kept
+        when --jobs or --services is not given. On Windows it also installs the program in
+        %ProgramFiles%\\AMSYOS\\Node (run it from there), writes the job account's password
+        into every profile's folder, and prints the line that makes the scheduled task
   amsyos-node join <code> --gateway https://<host> [--server] [--name <name>]
-        join the organisation with a code a manager made (node.join_code)
+        join the organisation with a code a manager made (node.join_code); with --profile,
+        a second node beside the default one (a key of its own)
+  amsyos-node profiles          the nodes of this account here: profile, node, organisation,
+        joined or not, folders, scheduled task
+  amsyos-node profile adopt <name> <folder>
+        make a node folder made by hand (a node run with another LOCALAPPDATA or HOME) the
+        profile <name>: moved into its place with its key, config and services; stop that
+        node first
   amsyos-node enable <service id> --dir <folder> --command \"<command line>\" [--serve \"<command line>\"] [--gpu] [--as-job]
         switch a service on: its command runs in <folder> as amsyos-job, which may read the
         folder but never write to it (on Windows the folder gets a protected ACL); at full
@@ -76,6 +91,15 @@ AMSYOS Node 2.1.7: this computer runs its organisation's services. Nothing dials
         run a switched-on service once, here, as a job; the job's folder is kept
   amsyos-node run [--allow-elevated]
         go online: take jobs until stopped (Ctrl+C)
+  amsyos-node auto-update [on|off]
+        whether this node updates itself: at its start and every 6 hours it asks its Gateway
+        for a newer version, takes only one signed by AMSYOS and restarts into it when it runs
+        no job. On for a node joined since 2.1.9; changed only here, by an administrator
+  amsyos-node update [--check]
+        the newest version now: put in place at once; a running node restarts into it once it
+        runs no job (through node.exec too: the exec ends first)
+  amsyos-node rollback
+        back to the program before the last update; that version is held back from auto-update
   amsyos-node info              what this machine has (JSON)
   amsyos-node job <params|param|input|output|progress|fail|next|done> …   (also as amsyos-job)
   amsyos-node version";
@@ -124,7 +148,7 @@ impl Args {
 }
 
 fn main() {
-    let argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+    let mut argv: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
     let stem = argv
         .first()
         .and_then(|a| Path::new(a).file_stem())
@@ -132,6 +156,15 @@ fn main() {
         .unwrap_or_default();
     if stem == "amsyos-job" {
         std::process::exit(job::main(&argv[1..]));
+    }
+    if argv.get(1).map(String::as_str) != Some("job") {
+        match take_profile(&mut argv) {
+            Ok(profile) => use_profile(profile),
+            Err(e) => {
+                eprintln!("amsyos-node: {e}");
+                std::process::exit(2);
+            }
+        }
     }
     let rest = argv.get(2..).unwrap_or(&[]);
     let what = argv.get(1).map(String::as_str).unwrap_or("");
@@ -153,6 +186,11 @@ fn main() {
         Some("disallow") => disallow_folder(rest),
         Some("allowed") => allowed(),
         Some("try") => try_service(rest),
+        Some("profiles") => profiles(),
+        Some("profile") => profile(rest),
+        Some("auto-update") => update::auto_update_cmd(rest),
+        Some("update") => update::update_cmd(rest),
+        Some("rollback") => update::rollback_cmd(rest),
         // Not in USAGE: for finding why a job does not start as the job account (Windows).
         Some("diag") => sys::diag(rest.first().map(PathBuf::from)),
         Some("version" | "--version" | "-V") => {
@@ -195,6 +233,233 @@ fn usage_of(what: &str) -> String {
     if out.is_empty() { USAGE.to_string() } else { out.join("\n") }
 }
 
+/// Node 2.1.9: `--profile <name>` (or `--profile=<name>`), wherever it is among the arguments,
+/// taken out of them; else AMSYOS_NODE_PROFILE; None: the default node.
+fn take_profile(argv: &mut Vec<String>) -> Result<Option<String>, String> {
+    let mut given = None;
+    let mut i = 1;
+    while i < argv.len() {
+        if argv[i] == "--profile" {
+            let v = argv.get(i + 1).cloned().ok_or("--profile needs a name, such as --profile acme")?;
+            argv.drain(i..i + 2);
+            given = Some(v);
+        } else if let Some(v) = argv[i].strip_prefix("--profile=") {
+            given = Some(v.to_string());
+            argv.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    let from_env = || std::env::var(config::PROFILE_ENV).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    match given.or_else(from_env) {
+        Some(p) if config::is_profile_name(&p) => Ok(Some(p)),
+        Some(p) => Err(format!(
+            "the profile {p:?} (--profile or {}): a-z, 0-9, - and _, at most 32, starting with a letter or a digit",
+            config::PROFILE_ENV
+        )),
+        None => Ok(None),
+    }
+}
+
+/// TODO(review): isolation — the profile decides every folder this process uses (config.rs).
+/// The node's environment says it too, so that what the node starts as its own account
+/// (`node.exec`, an `as_node` service) and runs `amsyos-node` works on the same node; a job
+/// as amsyos-job gets an environment of its own and never sees it. On Linux a profile also
+/// keeps the builds `amsyos deploy` makes apart (AMSYOS_BUILD_HOME, unless the account sets
+/// it): builds.rs frees what no deployment of this node uses, and must never free another
+/// profile's.
+fn use_profile(profile: Option<String>) {
+    if let Some(p) = &profile {
+        std::env::set_var(config::PROFILE_ENV, p);
+        #[cfg(unix)]
+        if std::env::var_os("AMSYOS_BUILD_HOME").is_none_or(|h| h.is_empty()) {
+            if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+                std::env::set_var("AMSYOS_BUILD_HOME", PathBuf::from(home).join(format!("amsyos-build-{p}")));
+            }
+        }
+    }
+    config::set_profile(profile);
+}
+
+/// The other nodes of this account on this computer (their profile, config), beside the node
+/// folder `dir`.
+fn others_beside(dir: &Path) -> Vec<(Option<String>, Config)> {
+    let Some(base) = dir.parent() else { return Vec::new() };
+    config::node_dirs_in(base)
+        .into_iter()
+        .filter(|(p, _)| p.as_deref() != config::profile())
+        .map(|(p, d)| (p, Config::load(&d)))
+        .collect()
+}
+
+/// TODO(review): isolation — profiles share the node's account (and the job account): at
+/// `full`, one organisation's admins run any command as that account, which also reads the
+/// other nodes' keys and files. Said wherever it may begin: `join` beside a node at `full`,
+/// `access full` beside another node, and in `profiles`.
+fn warn_full_beside(dir: &Path, raising: bool) {
+    let others: Vec<String> = others_beside(dir)
+        .into_iter()
+        .filter(|(_, c)| c.joined() && (raising || c.access() == Access::Full))
+        .map(|(p, c)| format!("{} of {} (profile {})", c.node, c.org, config::profile_label(p.as_deref())))
+        .collect();
+    if others.is_empty() {
+        return;
+    }
+    if raising {
+        eprintln!(
+            "warning: this computer also runs {} as this account: at full this organisation's admins can run any command as it, which reaches those nodes' keys and files too. Keep full for organisations that trust each other",
+            others.join(", ")
+        );
+    } else {
+        eprintln!(
+            "warning: {} runs here as this account at full: its organisation's admins can reach this node's key and files. Join only if the organisations trust each other",
+            others.join(", ")
+        );
+    }
+}
+
+/// How a profile's node starts: Windows, its scheduled task's line; Linux, its command.
+fn start_line(profile: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+            (Ok(d), Ok(u)) if !d.is_empty() => format!("{d}\\{u}"),
+            (_, Ok(u)) => u,
+            _ => "<you>".into(),
+        };
+        format!(
+            "its scheduled task \"{}\" (in an administrator window, then: schtasks /run /tn \"{}\"):\n  {}",
+            config::task_name(profile),
+            config::task_name(profile),
+            config::task_line(profile, &config::installed_exe(), &user)
+        )
+    }
+    #[cfg(unix)]
+    {
+        match profile {
+            Some(p) => format!("run it (as this user, in a service of your own): amsyos-node --profile {p} run"),
+            None => "run it (as this user): amsyos-node run".to_string(),
+        }
+    }
+}
+
+/// `profiles`: the nodes of this account on this computer, one a profile.
+fn profiles() -> Result<i32, String> {
+    let base = config::node_base();
+    let found = config::node_dirs();
+    if found.is_empty() {
+        println!("No node here yet (in {}): amsyos-node join <code> --gateway https://<host>", base.display());
+        return Ok(0);
+    }
+    println!("Nodes of this account on this computer, one per profile (amsyos-node --profile <name> <command>; * this one):");
+    let mut full = 0;
+    for (p, dir) in &found {
+        let p = p.as_deref();
+        let cfg = Config::load(dir);
+        let state = if cfg.joined() {
+            format!("node {} of {}, joined, {}", cfg.node, cfg.org, cfg.access().as_str())
+        } else {
+            "not joined".to_string()
+        };
+        if cfg.joined() && cfg.access() == Access::Full {
+            full += 1;
+        }
+        let mark = if p == config::profile() { "*" } else { " " };
+        println!("{mark} {:<16} {state}", config::profile_label(p));
+        println!("      folder:   {}", dir.display());
+        println!("      jobs:     {}", cfg.jobs_root_for(p).display());
+        println!("      services: {}", cfg.services_root_for(p).display());
+        if cfg!(windows) {
+            println!("      task:     {}", config::task_name(p));
+        } else {
+            println!("      run:      amsyos-node{} run", p.map(|p| format!(" --profile {p}")).unwrap_or_default());
+        }
+    }
+    if found.len() > 1 && full > 0 {
+        println!("\nThe profiles share this account and the job account {}: at full, an organisation's admins can reach every node here.", sys::JOB_USER);
+    }
+    Ok(0)
+}
+
+fn profile(args: &[String]) -> Result<i32, String> {
+    let a = Args::parse(args, &[], &[])?;
+    match a.pos.as_slice() {
+        [what, name, folder] if what == "adopt" => adopt(name, Path::new(folder)),
+        _ => Err(usage_of("profile")),
+    }
+}
+
+/// `profile adopt <name> <folder>`: a node folder made by hand becomes the profile <name>,
+/// moved into its place (same drive: a rename) with everything in it: key, config.json (the
+/// jobs and services folders it names are kept), services.json, logs and, on Windows, the job
+/// account's password file. TODO(review): isolation — only a folder of this account that holds
+/// a node (config.json and node.key), never the default node's or a profile's; the node that
+/// used it must be stopped (Windows refuses to move a folder whose node.log is open).
+fn adopt(name: &str, from: &Path) -> Result<i32, String> {
+    if !config::is_profile_name(name) {
+        return Err(format!("<name> {name:?}: a-z, 0-9, - and _, at most 32, starting with a letter or a digit"));
+    }
+    let from = std::path::absolute(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let meta = std::fs::symlink_metadata(&from).map_err(|e| format!("{}: {e}", from.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a folder (a link is not taken)", from.display()));
+    }
+    if !from.join(config::CONFIG_FILE).is_file() || !from.join(config::KEY_FILE).is_file() {
+        return Err(format!("{} holds no node: config.json and node.key are not both there", from.display()));
+    }
+    let base = config::node_base();
+    if let Some((p, _)) = config::node_dirs_in(&base).into_iter().find(|(_, d)| sys::same_path(d, &from)) {
+        return Err(format!("{} is already the node folder of profile {}", from.display(), config::profile_label(p.as_deref())));
+    }
+    let to = config::node_dir_of(Some(name));
+    if to.exists() {
+        return Err(format!("{} is there already: the profile {name} exists (amsyos-node profiles)", to.display()));
+    }
+    let cfg = Config::load(&from);
+    std::fs::create_dir_all(&base).map_err(|e| format!("cannot make {}: {e}", base.display()))?;
+    std::fs::rename(&from, &to).map_err(|e| {
+        format!(
+            "cannot move {} to {}: {e}\nstop the node that uses it first (Windows: schtasks /end /tn \"<its task>\"); the folder must be on the same drive as {}",
+            from.display(),
+            to.display(),
+            base.display()
+        )
+    })?;
+    config::ensure_node_dir(&to)?;
+    let p = Some(name);
+    println!("profile {name}: {} moved to {}", from.display(), to.display());
+    if cfg.joined() {
+        println!("  node {} of {}, {} (its key kept)", cfg.node, cfg.org, cfg.access().as_str());
+    } else {
+        println!("  not joined: amsyos-node --profile {name} join <code> --gateway https://<host>");
+    }
+    let (jobs, services) = (cfg.jobs_root_for(p), cfg.services_root_for(p));
+    let named = |o: &Option<PathBuf>| if o.is_some() { "as its config.json names it" } else { "this profile's own: run setup to make it" };
+    println!("  jobs:     {} ({})", jobs.display(), named(&cfg.jobs));
+    println!("  services: {} ({})", services.display(), named(&cfg.services_root));
+    if let Some(why) = config::clash(&base, p, &[(&jobs, "its jobs folder"), (&services, "its managed services folder")]) {
+        eprintln!("warning: {why}");
+    }
+    #[cfg(windows)]
+    {
+        let pw = to.join(config::PASSWORD_FILE);
+        let default_pw = config::node_dir_of(None).join(config::PASSWORD_FILE);
+        if !pw.is_file() && default_pw.is_file() {
+            match std::fs::copy(&default_pw, &pw) {
+                Ok(_) => println!("  the job account's password file: copied from the default node's folder"),
+                Err(e) => eprintln!("warning: the job account's password file could not be copied ({e}): run setup"),
+            }
+        }
+    }
+    println!("next: remove the task or service that started it from {} (and whatever set LOCALAPPDATA or HOME for it), then", from.display());
+    println!("{}", start_line(p));
+    println!(
+        "`{}amsyos-node --profile {name} setup` (with every node here stopped) renews the job account's password in every node folder here and sets this profile's folders' permissions; it keeps the folders config.json names",
+        if cfg!(windows) { "" } else { "sudo " },
+    );
+    Ok(0)
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -218,12 +483,35 @@ fn join(args: &[String]) -> Result<i32, String> {
     let a = Args::parse(args, &["--gateway", "--name"], &["--server"])?;
     let [code] = a.pos.as_slice() else { return Err("amsyos-node join <code> --gateway https://<host>".into()) };
     let gateway = a.one("--gateway").ok_or("--gateway https://<host> is missing")?;
+    let dir = config::node_dir();
+    let before = Config::load(&dir);
+    if before.joined() {
+        println!(
+            "{} holds node {} of {} already: joining replaces it here (a second node beside it, for another organisation: amsyos-node --profile <name> join …)",
+            dir.display(),
+            before.node,
+            before.org
+        );
+    }
+    warn_full_beside(&dir, false);
     runtime()?.block_on(net::join(code, gateway, a.flag("--server"), a.one("--name").map(String::from)))?;
+    if let Some(p) = config::profile() {
+        let cfg = Config::load(&dir);
+        println!(
+            "profile {p}: jobs in {}, managed services in {}; setup makes them and their permissions ({}{} setup, as an administrator), then",
+            cfg.jobs_root().display(),
+            cfg.services_root().display(),
+            if cfg!(windows) { "" } else { "sudo " },
+            config::command()
+        );
+        println!("{}", start_line(Some(p)));
+    }
     Ok(0)
 }
 
 fn run(args: &[String]) -> Result<i32, String> {
     let a = Args::parse(args, &[], &["--allow-elevated"])?;
+    update::at_start(); // 2.1.9, Linux: the copy an update kept, when newer (it execs into it)
     runtime()?.block_on(net::run(a.flag("--allow-elevated")))
 }
 
@@ -234,6 +522,9 @@ fn info() -> Result<i32, String> {
     eprintln!("{note}");
     let mut shown = serde_json::to_value(&machine).map_err(|e| e.to_string())?;
     if let Value::Object(m) = &mut shown {
+        if let Some(p) = config::profile() {
+            m.insert("profile".into(), p.into());
+        }
         m.insert("access".into(), cfg.access().as_str().into());
         m.insert("as_node_default".into(), cfg.as_node_by_default().into());
         m.insert("folders".into(), cfg.folder_names().into());
@@ -247,6 +538,9 @@ fn services() -> Result<i32, String> {
     let cfg = Config::load(&dir);
     let on = Services::load(&dir);
     let default = cfg.as_node_by_default();
+    if let Some(p) = config::profile() {
+        println!("Profile: {p} ({})", if cfg.joined() { format!("node {} of {}", cfg.node, cfg.org) } else { "not joined".into() });
+    }
     println!("Access level: {} ({})", cfg.access().as_str(), what_level_allows(cfg.access()));
     if default {
         println!("The default as_node is on: what is switched on here runs as this account, unless --as-job");
@@ -296,7 +590,7 @@ fn services() -> Result<i32, String> {
         }
     }
     let org = if cfg.org.is_empty() { "t_<org>" } else { cfg.org.as_str() };
-    println!("\nSwitch one on: amsyos-node enable {org}.node.<name> --dir <folder> --command \"<command line>\" [--gpu] [--as-job]");
+    println!("\nSwitch one on: {} enable {org}.node.<name> --dir <folder> --command \"<command line>\" [--gpu] [--as-job]", config::command());
     Ok(0)
 }
 
@@ -335,7 +629,14 @@ fn enable(args: &[String]) -> Result<i32, String> {
     if let Some(why) = sys::too_broad(&dir) {
         return Err(why);
     }
-    for (p, what) in [(&node_dir, "the node's own folder"), (&jobs_root, "the jobs folder"), (&config::bin_dir(), "bin")] {
+    // Node 2.1.9: nor what another profile here holds (its key, its jobs, its deployed services).
+    let mut places: Vec<(PathBuf, String)> = vec![
+        (node_dir.clone(), "the node's own folder".into()),
+        (jobs_root.clone(), "the jobs folder".into()),
+        (config::bin_dir(), "bin".into()),
+    ];
+    places.extend(node_dir.parent().map(|b| config::others_places(b, config::profile())).unwrap_or_default());
+    for (p, what) in &places {
         if sys::within(p, &dir) {
             return Err(format!("{} holds {what} ({}): give the service a folder of its own", dir.display(), p.display()));
         }
@@ -366,7 +667,7 @@ fn enable(args: &[String]) -> Result<i32, String> {
     } else {
         println!("switched on: {id} (runs in {} as {})", dir.display(), sys::JOB_USER);
     }
-    println!("check it here first: amsyos-node try {id} --params '{{}}'");
+    println!("check it here first: {} try {id} --params '{{}}'", config::command());
     Ok(0)
 }
 
@@ -436,6 +737,9 @@ fn access(args: &[String]) -> Result<i32, String> {
     cfg.save(&dir)?;
     sys::give_back(&dir.join(config::CONFIG_FILE), owner);
     let (now, default) = (cfg.access(), cfg.as_node_by_default());
+    if now == Access::Full && was != Access::Full {
+        warn_full_beside(&dir, true);
+    }
     println!("access level: {} (was {})", now.as_str(), was.as_str());
     println!("{}", what_level_allows(now));
     if default != had || default {
@@ -500,12 +804,15 @@ fn allow(args: &[String]) -> Result<i32, String> {
     let (dir, owner) = folders_target()?;
     let mut cfg = Config::load(&dir);
     let mine = folder::plain(&real);
-    for (p, what) in [
-        (dir.clone(), "the node's own folder (its key)"),
-        (cfg.jobs_root(), "the jobs folder"),
-        (config::bin_dir(), "bin"),
-        (cfg.services_root(), "the managed services folder"),
-    ] {
+    let mut places: Vec<(PathBuf, String)> = vec![
+        (dir.clone(), "the node's own folder (its key)".into()),
+        (cfg.jobs_root(), "the jobs folder".into()),
+        (config::bin_dir(), "bin".into()),
+        (cfg.services_root(), "the managed services folder".into()),
+    ];
+    // Node 2.1.9: nor what another profile here holds.
+    places.extend(dir.parent().map(|b| config::others_places(b, config::profile())).unwrap_or_default());
+    for (p, what) in places {
         let theirs = folder::plain(&p);
         if sys::within(&theirs, &mine) || sys::within(&mine, &theirs) {
             return Err(format!("{} holds or lies in {what} ({}): allow a folder of your own files", real.display(), p.display()));
